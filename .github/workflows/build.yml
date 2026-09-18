@@ -22,6 +22,13 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
+      - name: Add Android cmdline-tools to PATH
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+      
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses > /dev/null || true
 
