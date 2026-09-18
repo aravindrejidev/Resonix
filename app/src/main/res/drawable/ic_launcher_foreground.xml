@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- White circle, diameter 54dp, centered — sits inside the 66dp
+         adaptive-icon safe zone. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M27,54 A27,27 0 1 1 81,54 A27,27 0 1 1 27,54 Z" />
+    <!-- Play triangle cut into the circle. Replace this whole file with
+         your real logo's vector path once it's ready; the background
+         layer and the mipmap-anydpi-v26 XMLs can stay as they are. -->
+    <path
+        android:fillColor="#1B1B2F"
+        android:pathData="M45,37 L45,71 L75,54 Z" />
+</vector>

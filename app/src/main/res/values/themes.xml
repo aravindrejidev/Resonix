@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Only controls the brief pre-Compose window frame (background,
+         system bar color) before setContent {} takes over. All actual
+         app theming lives in ui/theme/Theme.kt via Material3. -->
+    <style name="Theme.Resonix" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>
