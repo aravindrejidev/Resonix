@@ -1,0 +1,180 @@
+name: Build FFmpeg (one-time, manual)
+
+# This does NOT run as part of the normal app build. Run it once via the
+# Actions tab, download the "resonix-ffmpeg-libs" artifact it produces,
+# and commit its contents into app/src/main/cpp/ffmpeg/ (see the paths
+# in the "package" job below). Re-run only if you bump FFMPEG_VERSION.
+on:
+  workflow_dispatch:
+
+env:
+  FFMPEG_VERSION: n9.0.1
+  NDK_VERSION: "28.2.13676358"
+  MIN_SDK: 26
+
+jobs:
+  build-ffmpeg:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - abi: arm64-v8a
+            arch: aarch64
+            cpu: armv8-a
+            triple: aarch64-linux-android
+          - abi: armeabi-v7a
+            arch: arm
+            cpu: armv7-a
+            triple: armv7a-linux-androideabi
+          - abi: x86_64
+            arch: x86_64
+            cpu: x86-64
+            triple: x86_64-linux-android
+
+    steps:
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y yasm nasm
+
+      - name: Add Android cmdline-tools to PATH
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Verify / install NDK ${{ env.NDK_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK_ROOT="$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"
+
+          # ubuntu-24.04 GitHub-hosted runners currently include this NDK.
+          # Avoid downloading it again when it is already present.
+          if [ -x "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            echo "NDK already available: $NDK_ROOT"
+          else
+            echo "NDK not found; installing with retries..."
+            for attempt in 1 2 3; do
+              if yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT"                   --install "ndk;${{ env.NDK_VERSION }}"; then
+                break
+              fi
+
+              if [ "$attempt" -eq 3 ]; then
+                echo "NDK installation failed after 3 attempts."
+                exit 1
+              fi
+
+              echo "NDK install attempt $attempt failed; retrying in 10s..."
+              sleep 10
+            done
+          fi
+
+          test -x "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          echo "NDK verified: $NDK_ROOT"
+
+      - name: Checkout FFmpeg ${{ env.FFMPEG_VERSION }}
+        run: |
+          set -euo pipefail
+          git clone --branch "${{ env.FFMPEG_VERSION }}" --depth 1             https://git.ffmpeg.org/ffmpeg.git ffmpeg-src
+
+      - name: Configure and build for ${{ matrix.abi }}
+        working-directory: ffmpeg-src
+        run: |
+          NDK_ROOT="$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"
+          TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
+          CC="$TOOLCHAIN/bin/${{ matrix.triple }}${{ env.MIN_SDK }}-clang"
+          CXX="$TOOLCHAIN/bin/${{ matrix.triple }}${{ env.MIN_SDK }}-clang++"
+          OUT_DIR="$GITHUB_WORKSPACE/ffmpeg-out/${{ matrix.abi }}"
+          mkdir -p "$OUT_DIR"
+
+          # Audio-only build: no video/network/CLI programs. Decoders and
+          # demuxers are left at their defaults (not individually
+          # whitelisted) so FLAC/MP3/AAC/ALAC/WAV/Opus/DSD all come along
+          # automatically without risking a typo'd component name failing
+          # the whole configure step. --disable-asm trades some decode
+          # speed for a build that doesn't depend on per-ABI hand-written
+          # assembly compiling cleanly — audio decode is light enough
+          # that this headroom doesn't matter on any phone-class CPU.
+          ./configure \
+            --prefix="$OUT_DIR" \
+            --target-os=android \
+            --arch=${{ matrix.arch }} \
+            --cpu=${{ matrix.cpu }} \
+            --enable-cross-compile \
+            --cc="$CC" \
+            --cxx="$CXX" \
+            --ar="$TOOLCHAIN/bin/llvm-ar" \
+            --nm="$TOOLCHAIN/bin/llvm-nm" \
+            --ranlib="$TOOLCHAIN/bin/llvm-ranlib" \
+            --strip="$TOOLCHAIN/bin/llvm-strip" \
+            --sysroot="$TOOLCHAIN/sysroot" \
+            --enable-shared \
+            --disable-static \
+            --disable-programs \
+            --disable-doc \
+            --disable-avdevice \
+            --disable-avfilter \
+            --disable-postproc \
+            --disable-network \
+            --enable-protocol=file \
+            --disable-encoders \
+            --disable-muxers \
+            --disable-asm \
+            --disable-gpl \
+            --disable-symver \
+            --extra-cflags="-O3 -fPIC"
+
+          make -j"$(nproc)"
+          make install
+
+      - name: Upload ${{ matrix.abi }} build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.abi }}
+          path: ffmpeg-out/${{ matrix.abi }}
+          retention-days: 14
+
+  package:
+    needs: build-ffmpeg
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download arm64-v8a build
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-arm64-v8a
+          path: collected/arm64-v8a
+
+      - name: Download armeabi-v7a build
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-armeabi-v7a
+          path: collected/armeabi-v7a
+
+      - name: Download x86_64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-x86_64
+          path: collected/x86_64
+
+      - name: Assemble app/src/main/cpp/ffmpeg layout
+        run: |
+          mkdir -p resonix-ffmpeg/include
+          mkdir -p resonix-ffmpeg/lib/arm64-v8a
+          mkdir -p resonix-ffmpeg/lib/armeabi-v7a
+          mkdir -p resonix-ffmpeg/lib/x86_64
+
+          cp -r collected/arm64-v8a/include/. resonix-ffmpeg/include/
+          cp collected/arm64-v8a/lib/*.so* resonix-ffmpeg/lib/arm64-v8a/
+          cp collected/armeabi-v7a/lib/*.so* resonix-ffmpeg/lib/armeabi-v7a/
+          cp collected/x86_64/lib/*.so* resonix-ffmpeg/lib/x86_64/
+
+      - name: Upload combined ffmpeg package
+        uses: actions/upload-artifact@v4
+        with:
+          name: resonix-ffmpeg-libs
+          path: resonix-ffmpeg
+          retention-days: 90
