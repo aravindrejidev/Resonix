@@ -9,13 +9,13 @@ on:
 
 env:
   FFMPEG_VERSION: n9.0.1
-  NDK_VERSION: "28.2.13676358"
   MIN_SDK: 26
 
 jobs:
   build-ffmpeg:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - abi: arm64-v8a
@@ -35,18 +35,10 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y yasm nasm
 
-      - name: Add Android cmdline-tools to PATH
-        run: |
-          SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null || true
-
-      - name: Install NDK ${{ env.NDK_VERSION }}
-        run: sdkmanager "ndk;${{ env.NDK_VERSION }}"
+      - name: Setup NDK
+        uses: nsetup/setup-ndk@v1
+        with:
+          ndk-version: r26b
 
       - name: Checkout FFmpeg ${{ env.FFMPEG_VERSION }}
         run: git clone --branch ${{ env.FFMPEG_VERSION }} --depth 1 https://git.ffmpeg.org/ffmpeg.git ffmpeg-src
@@ -54,21 +46,13 @@ jobs:
       - name: Configure and build for ${{ matrix.abi }}
         working-directory: ffmpeg-src
         run: |
-          NDK_ROOT="$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"
+          NDK_ROOT="$ANDROID_NDK_HOME"
           TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
           CC="$TOOLCHAIN/bin/${{ matrix.triple }}${{ env.MIN_SDK }}-clang"
           CXX="$TOOLCHAIN/bin/${{ matrix.triple }}${{ env.MIN_SDK }}-clang++"
           OUT_DIR="$GITHUB_WORKSPACE/ffmpeg-out/${{ matrix.abi }}"
           mkdir -p "$OUT_DIR"
 
-          # Audio-only build: no video/network/CLI programs. Decoders and
-          # demuxers are left at their defaults (not individually
-          # whitelisted) so FLAC/MP3/AAC/ALAC/WAV/Opus/DSD all come along
-          # automatically without risking a typo'd component name failing
-          # the whole configure step. --disable-asm trades some decode
-          # speed for a build that doesn't depend on per-ABI hand-written
-          # assembly compiling cleanly — audio decode is light enough
-          # that this headroom doesn't matter on any phone-class CPU.
           ./configure \
             --prefix="$OUT_DIR" \
             --target-os=android \
