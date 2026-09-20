@@ -131,4 +131,53 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeGetFormatName(
     return env->NewStringUTF(name.c_str());
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetTitle(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    std::string value = engine != nullptr ? engine->getAudioTrackInfo().title : "";
+    return env->NewStringUTF(value.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetArtist(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    std::string value = engine != nullptr ? engine->getAudioTrackInfo().artist : "";
+    return env->NewStringUTF(value.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetAlbum(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    std::string value = engine != nullptr ? engine->getAudioTrackInfo().album : "";
+    return env->NewStringUTF(value.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetYear(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return engine != nullptr ? engine->getAudioTrackInfo().year : 0;
+}
+
+// --- Direct Volume Control ---------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetGain(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jdouble linearGain) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setGain(linearGain);
+    }
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetGain(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return engine != nullptr ? engine->getGain() : 1.0;
+}
+
 }  // extern "C"
