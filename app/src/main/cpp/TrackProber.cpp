@@ -81,4 +81,31 @@ Java_com_resonix_player_audio_TrackProber_nativeGetFormatName(
     return env->NewStringUTF(h->lastInfo.formatName.c_str());
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_TrackProber_nativeGetTitle(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *h = reinterpret_cast<ProbeHandle *>(handle);
+    return env->NewStringUTF(h->lastInfo.title.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_TrackProber_nativeGetArtist(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *h = reinterpret_cast<ProbeHandle *>(handle);
+    return env->NewStringUTF(h->lastInfo.artist.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_TrackProber_nativeGetAlbum(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *h = reinterpret_cast<ProbeHandle *>(handle);
+    return env->NewStringUTF(h->lastInfo.album.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_resonix_player_audio_TrackProber_nativeGetYear(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    return reinterpret_cast<ProbeHandle *>(handle)->lastInfo.year;
+}
+
 }  // extern "C"
