@@ -76,6 +76,13 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeIsPlaying(
     return (engine != nullptr && engine->isPlaying()) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeConsumeTrackFinished(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return (engine != nullptr && engine->consumeTrackFinishedEvent()) ? JNI_TRUE : JNI_FALSE;
+}
+
 // --- Track info getters -----------------------------------------------
 // Kept as individual primitive-returning functions and assembled into
 // an AudioTrackInfo on the Kotlin side (NativeAudioEngine.kt), rather
