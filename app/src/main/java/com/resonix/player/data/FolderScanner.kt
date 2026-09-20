@@ -22,11 +22,11 @@ class FolderScanner(private val context: Context) {
      * Safe to call again later to re-scan the same tree: rows previously
      * scanned from this root that are no longer found get removed.
      *
-     * Folder-scanned rows don't have ID3-tag-based title/artist/album —
-     * title falls back to the filename, artist/album to placeholders.
-     * Wiring TrackProber up to also read libavformat's metadata
-     * dictionary would fix this if you want it; happy to add that
-     * separately.
+     * title/artist/album/year come from the file's own container tags
+     * (via TrackProber, which reads libavformat's metadata dictionary —
+     * same as MediaStoreScanner's native probe). Falls back to the
+     * filename for title, "Unknown artist"/"Unknown album" for those,
+     * only when a file genuinely has no such tag.
      */
     suspend fun scanFolder(treeUri: Uri) = withContext(Dispatchers.IO) {
         val rootDoc = DocumentFile.fromTreeUri(context, treeUri)
@@ -83,15 +83,17 @@ class FolderScanner(private val context: Context) {
                 dao.upsert(
                     Track(
                         contentUri = uriString,
-                        title = fileNameWithoutExtension(child.name),
-                        artist = "Unknown artist",
-                        album = "Unknown album",
+                        title = info?.title?.takeIf { it.isNotBlank() }
+                            ?: fileNameWithoutExtension(child.name),
+                        artist = info?.artist?.takeIf { it.isNotBlank() } ?: "Unknown artist",
+                        album = info?.album?.takeIf { it.isNotBlank() } ?: "Unknown album",
                         albumArtUri = "",
                         durationMs = info?.durationMs ?: 0L,
                         sampleRateHz = info?.sampleRateHz ?: 0,
                         bitDepth = info?.bitDepth ?: 0,
                         bitrateBps = info?.bitrateBps ?: 0L,
                         format = info?.format ?: "",
+                        year = info?.year ?: 0,
                         dateAddedSec = child.lastModified() / 1000,
                         rootFolderUri = rootUriString,
                         folderPath = relativePath,
