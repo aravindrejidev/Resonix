@@ -49,6 +49,15 @@ public:
     TrackInfo getAudioTrackInfo() const;
     bool isPlaying() const { return mIsPlaying.load(std::memory_order_relaxed); }
 
+    // Direct Volume Control: linear gain multiplier applied in the
+    // double-precision DSP stage in onAudioReady, ahead of the float32
+    // cast Oboe sees — independent of Android's stream-volume ceiling.
+    // 1.0 = unity. Clamped to [0, kMaxGain] until the Peak Limiter
+    // (next stage) exists to safely allow pushing higher without clipping.
+    void setGain(double linearGain);
+    double getGain() const { return mGain.load(std::memory_order_relaxed); }
+    static constexpr double kMaxGain = 2.0;  // +6.02 dB
+
     // True exactly once per track that reached end-of-stream on its own
     // (not a manual pauseTrack()), then resets — call periodically from
     // Kotlin to drive playback-queue auto-advance.
