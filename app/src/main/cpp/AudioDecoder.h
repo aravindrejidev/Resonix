@@ -27,6 +27,13 @@ struct TrackInfo {
     int64_t bitrateBps = 0;
     int64_t durationMs = 0;
     std::string formatName;
+    // Container tags (ID3v2 for MP3, Vorbis comments for FLAC/Opus,
+    // iTunes-style atoms for M4A/ALAC, ...) — empty string / 0 if the
+    // file has no such tag, not guessed from anything else.
+    std::string title;
+    std::string artist;
+    std::string album;
+    int year = 0;
 };
 
 // Wraps libavformat + libavcodec + libswresample to decode one audio
