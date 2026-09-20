@@ -1,5 +1,7 @@
 package com.resonix.player.audio
 
+import kotlin.math.pow
+
 /**
  * Exact decoded properties of the currently loaded track — what FFmpeg
  * actually decoded it as, not file tags. sampleRateHz/channelCount are
@@ -12,7 +14,11 @@ data class AudioTrackInfo(
     val channelCount: Int,
     val bitrateBps: Long,
     val durationMs: Long,
-    val format: String
+    val format: String,
+    val title: String = "",
+    val artist: String = "",
+    val album: String = "",
+    val year: Int = 0
 )
 
 /**
@@ -74,8 +80,30 @@ class NativeAudioEngine {
             channelCount = nativeGetChannelCount(nativeHandle),
             bitrateBps = nativeGetBitrateBps(nativeHandle),
             durationMs = nativeGetDurationMs(nativeHandle),
-            format = nativeGetFormatName(nativeHandle)
+            format = nativeGetFormatName(nativeHandle),
+            title = nativeGetTitle(nativeHandle),
+            artist = nativeGetArtist(nativeHandle),
+            album = nativeGetAlbum(nativeHandle),
+            year = nativeGetYear(nativeHandle)
         )
+    }
+
+    /** Direct Volume Control: linear gain multiplier in the native
+     * 64-bit DSP stage, applied before the float32 cast Oboe sees —
+     * independent of Android's normal stream-volume ceiling. 1.0 =
+     * unity, clamped natively to [0, 2.0] until the Peak Limiter
+     * (planned next) exists to safely allow pushing higher. */
+    fun setGain(linearGain: Double) {
+        if (nativeHandle != 0L) nativeSetGain(nativeHandle, linearGain)
+    }
+
+    /** Same as [setGain] but expressed in decibels (0dB = unity). */
+    fun setGainDb(db: Double) {
+        setGain(10.0.pow(db / 20.0))
+    }
+
+    fun getGain(): Double {
+        return if (nativeHandle != 0L) nativeGetGain(nativeHandle) else 1.0
     }
 
     fun release() {
@@ -100,6 +128,12 @@ class NativeAudioEngine {
     private external fun nativeGetBitrateBps(handle: Long): Long
     private external fun nativeGetDurationMs(handle: Long): Long
     private external fun nativeGetFormatName(handle: Long): String
+    private external fun nativeGetTitle(handle: Long): String
+    private external fun nativeGetArtist(handle: Long): String
+    private external fun nativeGetAlbum(handle: Long): String
+    private external fun nativeGetYear(handle: Long): Int
+    private external fun nativeSetGain(handle: Long, linearGain: Double)
+    private external fun nativeGetGain(handle: Long): Double
 
     companion object {
         init {
