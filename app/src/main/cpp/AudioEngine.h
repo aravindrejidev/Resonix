@@ -49,6 +49,11 @@ public:
     TrackInfo getAudioTrackInfo() const;
     bool isPlaying() const { return mIsPlaying.load(std::memory_order_relaxed); }
 
+    // True exactly once per track that reached end-of-stream on its own
+    // (not a manual pauseTrack()), then resets — call periodically from
+    // Kotlin to drive playback-queue auto-advance.
+    bool consumeTrackFinishedEvent();
+
     // oboe::AudioStreamDataCallback
     oboe::DataCallbackResult onAudioReady(
             oboe::AudioStream *audioStream, void *audioData, int32_t numFrames) override;
@@ -78,6 +83,7 @@ private:
 
     std::atomic<bool> mIsPlaying{false};
     std::atomic<double> mGain{1.0};
+    std::atomic<bool> mTrackFinishedEvent{false};
 
     mutable std::mutex mTrackInfoLock;
     TrackInfo mTrackInfo;
