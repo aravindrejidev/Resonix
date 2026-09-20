@@ -247,7 +247,7 @@ fun PlayerScreen() {
         HorizontalDivider()
 
         LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(items = tracks, key = { it.mediaStoreId }) { track ->
+            items(items = tracks, key = { it.mediaStoreId ?: it.contentUri }) { track ->
                 ListItem(
                     headlineContent = { Text(track.title) },
                     supportingContent = {
