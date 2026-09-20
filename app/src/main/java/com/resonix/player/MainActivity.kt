@@ -1,48 +1,69 @@
 package com.resonix.player
 
+import android.Manifest
 import android.content.ContentResolver
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import com.resonix.player.audio.AudioTrackInfo
 import com.resonix.player.audio.NativeAudioEngine
+import com.resonix.player.data.AppDatabase
+import com.resonix.player.data.MediaStoreScanner
 import com.resonix.player.ui.theme.ResonixTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+private const val TAG = "PlayerScreen"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,32 +83,85 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Phase 2A smoke-test UI: pick any audio file via the system document
- * picker (no storage permission required — SAF grants access to just
- * that file) and play it through the real FFmpeg decode pipeline.
- * Phase 2B replaces the "pick a file" button with a scanned library
- * list, feeding playTrack() the same way.
+ * Phase 2B: adds a permission-gated MediaStore scan and a Room-backed
+ * track list on top of Phase 2A's SAF file picker. Both ways of picking
+ * a file funnel into the same [playUri] — MediaStore rows store a
+ * content:// URI, not a filesystem path, so playback opens a fresh file
+ * descriptor for it exactly the way the SAF path already did.
+ *
+ * State is kept directly in this Composable rather than a ViewModel —
+ * fine while the UI is this simple, but worth revisiting once a real
+ * player screen (queue, more controls) makes this file grow further.
  */
 @Composable
 fun PlayerScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val engine = remember { NativeAudioEngine() }
+    val scanner = remember { MediaStoreScanner(context) }
+    val tracks by remember {
+        AppDatabase.getInstance(context).trackDao().getAllTracks()
+    }.collectAsState(initial = emptyList())
+
     var isPlaying by remember { mutableStateOf(false) }
+    var isScanning by remember { mutableStateOf(false) }
     var trackInfo by remember { mutableStateOf<AudioTrackInfo?>(null) }
     var positionMs by remember { mutableStateOf(0L) }
-    var openFd by remember { mutableStateOf<ParcelFileDescriptor?>(null) }
-    var pickedFileName by remember { mutableStateOf<String?>(null) }
+    var nowPlayingFd by remember { mutableStateOf<ParcelFileDescriptor?>(null) }
+    var nowPlayingLabel by remember { mutableStateOf<String?>(null) }
+
+    val readAudioPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+    var hasPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, readAudioPermission) ==
+                    PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    fun runScan() {
+        scope.launch {
+            isScanning = true
+            scanner.scan()
+            isScanning = false
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasPermission = granted
+        if (granted) runScan()
+    }
+
+    fun playUri(uri: Uri, label: String?) {
+        try {
+            nowPlayingFd?.close()
+            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+            nowPlayingFd = pfd
+            if (pfd != null) {
+                val started = engine.playTrack("/proc/self/fd/${pfd.fd}")
+                isPlaying = started
+                trackInfo = if (started) engine.getAudioTrackInfo() else null
+                nowPlayingLabel = label
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to open $uri", e)
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
             engine.release()
-            openFd?.close()
+            nowPlayingFd?.close()
         }
     }
 
-    // Position polling stand-in for Phase 2A verification. Phase 2B's
-    // UI should drive this from a MediaSession/PlaybackState callback
-    // instead of polling on a timer.
+    // Position polling stand-in — a MediaSession/PlaybackState callback
+    // would replace this once the app has one.
     LaunchedEffect(isPlaying) {
         while (isPlaying) {
             positionMs = engine.getCurrentPositionMs()
@@ -98,84 +172,95 @@ fun PlayerScreen() {
     val pickFileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
-
-        openFd?.close()
-        val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-        openFd = pfd
-
-        if (pfd != null) {
-            // FFmpeg's file protocol wants a path; /proc/self/fd bridges
-            // the already-open, SAF-granted descriptor into one without
-            // copying the file or needing a storage permission.
-            val fdPath = "/proc/self/fd/${pfd.fd}"
-            val started = engine.playTrack(fdPath)
-            isPlaying = started
-            trackInfo = if (started) engine.getAudioTrackInfo() else null
-            pickedFileName = queryDisplayName(context.contentResolver, uri)
+        if (uri != null) {
+            playUri(uri, queryDisplayName(context.contentResolver, uri))
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(text = "Resonix", style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = pickedFileName ?: "No file loaded",
-            style = MaterialTheme.typography.bodyMedium
-        )
-
-        trackInfo?.let { info ->
-            Spacer(modifier = Modifier.height(4.dp))
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(text = "Resonix", style = MaterialTheme.typography.headlineMedium)
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "${info.format.uppercase()} • ${info.sampleRateHz} Hz • " +
-                        "${info.bitDepth}-bit • ${info.channelCount}ch",
-                style = MaterialTheme.typography.bodySmall
+                text = nowPlayingLabel ?: "Nothing playing",
+                style = MaterialTheme.typography.bodyMedium
             )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "${formatMs(positionMs)} / ${formatMs(info.durationMs)}",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
 
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            FilledTonalIconButton(
-                onClick = { pickFileLauncher.launch(arrayOf("audio/*")) },
-                modifier = Modifier.size(64.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.FolderOpen,
-                    contentDescription = "Open file",
-                    modifier = Modifier.size(28.dp)
+            trackInfo?.let { info ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "${info.format.uppercase()} • ${info.sampleRateHz} Hz • " +
+                            "${info.bitDepth}-bit • ${info.channelCount}ch",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = "${formatMs(positionMs)} / ${formatMs(info.durationMs)}",
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
 
-            FilledIconButton(
-                onClick = {
-                    if (trackInfo == null) return@FilledIconButton
-                    if (isPlaying) {
-                        engine.pauseTrack()
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                FilledTonalIconButton(
+                    onClick = { pickFileLauncher.launch(arrayOf("audio/*")) },
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    Icon(imageVector = Icons.Filled.FolderOpen, contentDescription = "Open file")
+                }
+
+                FilledTonalIconButton(
+                    onClick = {
+                        if (hasPermission) runScan() else permissionLauncher.launch(readAudioPermission)
+                    },
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    if (isScanning) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     } else {
-                        engine.resumeTrack()
+                        Icon(imageVector = Icons.Filled.Refresh, contentDescription = "Scan library")
                     }
-                    isPlaying = !isPlaying
-                },
-                enabled = trackInfo != null,
-                modifier = Modifier.size(80.dp)
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    modifier = Modifier.size(40.dp)
+                }
+
+                FilledIconButton(
+                    onClick = {
+                        if (trackInfo == null) return@FilledIconButton
+                        if (isPlaying) engine.pauseTrack() else engine.resumeTrack()
+                        isPlaying = !isPlaying
+                    },
+                    enabled = trackInfo != null,
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play"
+                    )
+                }
+            }
+        }
+
+        HorizontalDivider()
+
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(items = tracks, key = { it.mediaStoreId }) { track ->
+                ListItem(
+                    headlineContent = { Text(track.title) },
+                    supportingContent = {
+                        Text(
+                            "${track.artist} • ${track.format.uppercase()} " +
+                                    "${track.sampleRateHz}Hz/${track.bitDepth}-bit"
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            playUri(track.contentUri.toUri(), "${track.title} — ${track.artist}")
+                        }
                 )
             }
         }
