@@ -32,6 +32,7 @@ data class Track(
     val bitDepth: Int,
     val bitrateBps: Long,
     val format: String,
+    val year: Int = 0,
     val dateAddedSec: Long,
     val rootFolderUri: String = "",
     val folderPath: String = "",
