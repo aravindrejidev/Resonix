@@ -57,6 +57,13 @@ class NativeAudioEngine {
         return nativeHandle != 0L && nativeIsPlaying(nativeHandle)
     }
 
+    /** True exactly once per track that finished on its own (reached the
+     * end of the file, not a manual pauseTrack()) — poll this alongside
+     * position updates to drive playback-queue auto-advance. */
+    fun consumeTrackFinishedEvent(): Boolean {
+        return nativeHandle != 0L && nativeConsumeTrackFinished(nativeHandle)
+    }
+
     fun getAudioTrackInfo(): AudioTrackInfo {
         if (nativeHandle == 0L) {
             return AudioTrackInfo(0, 0, 0, 0L, 0L, "")
@@ -86,6 +93,7 @@ class NativeAudioEngine {
     private external fun nativeSeekTo(handle: Long, positionMs: Long)
     private external fun nativeGetCurrentPositionMs(handle: Long): Long
     private external fun nativeIsPlaying(handle: Long): Boolean
+    private external fun nativeConsumeTrackFinished(handle: Long): Boolean
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetBitDepth(handle: Long): Int
     private external fun nativeGetChannelCount(handle: Long): Int
