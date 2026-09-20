@@ -1,6 +1,7 @@
 #include "AudioDecoder.h"
 
 #include <android/log.h>
+#include <cstdlib>
 
 #define LOG_TAG "ResonixDecoder"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -80,6 +81,21 @@ bool AudioDecoder::open(const std::string &filePath, TrackInfo *outInfo) {
                 : 0;
         const AVCodec *codec = avcodec_find_decoder(params->codec_id);
         outInfo->formatName = (codec != nullptr && codec->name != nullptr) ? codec->name : "unknown";
+
+        auto readTag = [this](const char *key) -> std::string {
+            AVDictionaryEntry *entry = av_dict_get(mFormatCtx->metadata, key, nullptr, 0);
+            return (entry != nullptr && entry->value != nullptr) ? std::string(entry->value) : "";
+        };
+        outInfo->title = readTag("title");
+        outInfo->artist = readTag("artist");
+        outInfo->album = readTag("album");
+        std::string dateTag = readTag("date");
+        if (!dateTag.empty()) {
+            // "date" can be a bare year ("2023") or a full date
+            // ("2023-05-12", "2023-05-12T00:00:00Z") — atoi reads the
+            // leading digits either way and stops at the first non-digit.
+            outInfo->year = std::atoi(dateTag.c_str());
+        }
     }
 
     LOGI("Opened %s: %dHz, %d ch, decoder-reported %d-bit", filePath.c_str(),
