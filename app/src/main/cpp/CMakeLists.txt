@@ -21,6 +21,7 @@ add_library(resonix_audio SHARED
     native-lib.cpp
     AudioEngine.cpp
     AudioDecoder.cpp
+    TrackProber.cpp
 )
 
 target_compile_features(resonix_audio PRIVATE cxx_std_17)
