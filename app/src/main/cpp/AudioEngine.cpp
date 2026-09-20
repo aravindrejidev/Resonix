@@ -101,6 +101,10 @@ TrackInfo AudioEngine::getAudioTrackInfo() const {
     return mTrackInfo;
 }
 
+bool AudioEngine::consumeTrackFinishedEvent() {
+    return mTrackFinishedEvent.exchange(false, std::memory_order_relaxed);
+}
+
 oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCount) {
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
@@ -226,6 +230,7 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     bool trackDone = mDecoder->isEndOfStream() && mRingBuffer->availableToRead() == 0;
     if (trackDone) {
         mIsPlaying.store(false, std::memory_order_relaxed);
+        mTrackFinishedEvent.store(true, std::memory_order_relaxed);
         return oboe::DataCallbackResult::Stop;
     }
 
