@@ -26,7 +26,11 @@ class TrackProber {
             channelCount = nativeGetChannelCount(nativeHandle),
             bitrateBps = nativeGetBitrateBps(nativeHandle),
             durationMs = nativeGetDurationMs(nativeHandle),
-            format = nativeGetFormatName(nativeHandle)
+            format = nativeGetFormatName(nativeHandle),
+            title = nativeGetTitle(nativeHandle),
+            artist = nativeGetArtist(nativeHandle),
+            album = nativeGetAlbum(nativeHandle),
+            year = nativeGetYear(nativeHandle)
         )
     }
 
@@ -46,6 +50,10 @@ class TrackProber {
     private external fun nativeGetBitrateBps(handle: Long): Long
     private external fun nativeGetDurationMs(handle: Long): Long
     private external fun nativeGetFormatName(handle: Long): String
+    private external fun nativeGetTitle(handle: Long): String
+    private external fun nativeGetArtist(handle: Long): String
+    private external fun nativeGetAlbum(handle: Long): String
+    private external fun nativeGetYear(handle: Long): Int
 
     companion object {
         init {
