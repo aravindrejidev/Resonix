@@ -105,6 +105,11 @@ bool AudioEngine::consumeTrackFinishedEvent() {
     return mTrackFinishedEvent.exchange(false, std::memory_order_relaxed);
 }
 
+void AudioEngine::setGain(double linearGain) {
+    double clamped = std::max(0.0, std::min(linearGain, kMaxGain));
+    mGain.store(clamped, std::memory_order_relaxed);
+}
+
 oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCount) {
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
