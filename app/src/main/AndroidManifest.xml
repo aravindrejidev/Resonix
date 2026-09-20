@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- MediaStore library scan (Phase 2B). Requested at runtime, not just
+         declared here — see MainActivity's permission launcher. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <!-- Declares interest in low-latency / pro audio hardware without excluding
          devices that lack it (required="false"). Relevant to the Oboe/AAudio
          exclusive-mode engine this app is built around. -->
