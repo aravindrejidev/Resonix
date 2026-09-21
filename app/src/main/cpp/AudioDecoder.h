@@ -34,6 +34,12 @@ struct TrackInfo {
     std::string artist;
     std::string album;
     int year = 0;
+    // REPLAYGAIN_TRACK_GAIN / REPLAYGAIN_TRACK_PEAK tags, 0.0 / 1.0 (no
+    // adjustment, unknown peak) when the file has none. trackPeakLinear
+    // is stored for reference; the DSP chain relies on the Peak Limiter
+    // rather than this value to stay safe regardless of gain source.
+    double trackGainDb = 0.0;
+    double trackPeakLinear = 1.0;
 };
 
 // Wraps libavformat + libavcodec + libswresample to decode one audio
