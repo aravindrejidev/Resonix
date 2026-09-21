@@ -3,6 +3,7 @@
 #include <android/log.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #define LOG_TAG "ResonixAudioEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -37,6 +38,9 @@ bool AudioEngine::playTrack(const std::string &filePath) {
         LOGE("Failed to open track: %s", filePath.c_str());
         return false;
     }
+
+    double replayGainLinear = std::pow(10.0, info.trackGainDb / 20.0);
+    mReplayGainMultiplier.store(replayGainLinear, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lock(mStreamLock);
@@ -149,6 +153,8 @@ oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCo
         mReadScratch.resize(scratchSize);
     }
 
+    mLimiter.configure(static_cast<double>(mStream->getSampleRate()));
+
     return oboe::Result::OK;
 }
 
@@ -211,13 +217,31 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     size_t samplesNeeded = static_cast<size_t>(framesToProcess) * channels;
 
     size_t gotSamples = mRingBuffer->read(mReadScratch.data(), samplesNeeded);
+    size_t framesGot = gotSamples / static_cast<size_t>(channels);
 
-    // Double-precision DSP stage. Gain today; parametric/graphic EQ
-    // will process mReadScratch here too, still in double, before this
-    // final cast down to float32 for Oboe.
-    double gain = mGain.load(std::memory_order_relaxed);
-    for (size_t i = 0; i < gotSamples; i++) {
-        out[i] = static_cast<float>(mReadScratch[i] * gain);
+    // Double-precision DSP chain: DVC gain * ReplayGain, then the Peak
+    // Limiter — computed per frame (not per sample) so its gain
+    // reduction is shared across channels and never shifts the stereo
+    // image. The future EQ processes mReadScratch here too, still in
+    // double, ahead of the limiter so it's protected the same way
+    // DVC/ReplayGain boosts are.
+    constexpr int32_t kMaxLimiterChannels = 8;  // generous for music; see frameBuf below
+    double combinedGain = mGain.load(std::memory_order_relaxed) *
+            mReplayGainMultiplier.load(std::memory_order_relaxed);
+
+    for (size_t f = 0; f < framesGot; f++) {
+        size_t base = f * static_cast<size_t>(channels);
+        double frameBuf[kMaxLimiterChannels];
+        int32_t limiterChannels = std::min(channels, kMaxLimiterChannels);
+        for (int32_t c = 0; c < limiterChannels; c++) {
+            frameBuf[c] = mReadScratch[base + static_cast<size_t>(c)] * combinedGain;
+        }
+        double limiterGain = mLimiter.process(frameBuf, limiterChannels);
+
+        for (int32_t c = 0; c < channels; c++) {
+            double sample = mReadScratch[base + static_cast<size_t>(c)] * combinedGain;
+            out[base + static_cast<size_t>(c)] = static_cast<float>(sample * limiterGain);
+        }
     }
     // Underrun (decoder fell behind) or nothing queued yet: silence-fill
     // rather than leaving stale/garbage data in the output buffer.
