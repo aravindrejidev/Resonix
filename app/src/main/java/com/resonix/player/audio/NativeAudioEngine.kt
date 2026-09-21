@@ -18,7 +18,9 @@ data class AudioTrackInfo(
     val title: String = "",
     val artist: String = "",
     val album: String = "",
-    val year: Int = 0
+    val year: Int = 0,
+    val trackGainDb: Double = 0.0,
+    val trackPeakLinear: Double = 1.0
 )
 
 /**
@@ -84,7 +86,9 @@ class NativeAudioEngine {
             title = nativeGetTitle(nativeHandle),
             artist = nativeGetArtist(nativeHandle),
             album = nativeGetAlbum(nativeHandle),
-            year = nativeGetYear(nativeHandle)
+            year = nativeGetYear(nativeHandle),
+            trackGainDb = nativeGetTrackGainDb(nativeHandle),
+            trackPeakLinear = nativeGetTrackPeak(nativeHandle)
         )
     }
 
@@ -132,6 +136,8 @@ class NativeAudioEngine {
     private external fun nativeGetArtist(handle: Long): String
     private external fun nativeGetAlbum(handle: Long): String
     private external fun nativeGetYear(handle: Long): Int
+    private external fun nativeGetTrackGainDb(handle: Long): Double
+    private external fun nativeGetTrackPeak(handle: Long): Double
     private external fun nativeSetGain(handle: Long, linearGain: Double)
     private external fun nativeGetGain(handle: Long): Double
 
