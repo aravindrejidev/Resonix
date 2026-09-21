@@ -30,7 +30,9 @@ class TrackProber {
             title = nativeGetTitle(nativeHandle),
             artist = nativeGetArtist(nativeHandle),
             album = nativeGetAlbum(nativeHandle),
-            year = nativeGetYear(nativeHandle)
+            year = nativeGetYear(nativeHandle),
+            trackGainDb = nativeGetTrackGainDb(nativeHandle),
+            trackPeakLinear = nativeGetTrackPeak(nativeHandle)
         )
     }
 
@@ -54,6 +56,8 @@ class TrackProber {
     private external fun nativeGetArtist(handle: Long): String
     private external fun nativeGetAlbum(handle: Long): String
     private external fun nativeGetYear(handle: Long): Int
+    private external fun nativeGetTrackGainDb(handle: Long): Double
+    private external fun nativeGetTrackPeak(handle: Long): Double
 
     companion object {
         init {
