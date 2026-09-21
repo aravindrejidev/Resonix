@@ -108,4 +108,16 @@ Java_com_resonix_player_audio_TrackProber_nativeGetYear(
     return reinterpret_cast<ProbeHandle *>(handle)->lastInfo.year;
 }
 
+JNIEXPORT jdouble JNICALL
+Java_com_resonix_player_audio_TrackProber_nativeGetTrackGainDb(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    return reinterpret_cast<ProbeHandle *>(handle)->lastInfo.trackGainDb;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_resonix_player_audio_TrackProber_nativeGetTrackPeak(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    return reinterpret_cast<ProbeHandle *>(handle)->lastInfo.trackPeakLinear;
+}
+
 }  // extern "C"
