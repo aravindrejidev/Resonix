@@ -162,6 +162,20 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeGetYear(
     return engine != nullptr ? engine->getAudioTrackInfo().year : 0;
 }
 
+JNIEXPORT jdouble JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetTrackGainDb(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return engine != nullptr ? engine->getAudioTrackInfo().trackGainDb : 0.0;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetTrackPeak(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return engine != nullptr ? engine->getAudioTrackInfo().trackPeakLinear : 1.0;
+}
+
 // --- Direct Volume Control ---------------------------------------------
 
 JNIEXPORT void JNICALL
