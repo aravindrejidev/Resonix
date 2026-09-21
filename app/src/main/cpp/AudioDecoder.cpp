@@ -96,6 +96,18 @@ bool AudioDecoder::open(const std::string &filePath, TrackInfo *outInfo) {
             // leading digits either way and stops at the first non-digit.
             outInfo->year = std::atoi(dateTag.c_str());
         }
+
+        std::string gainTag = readTag("REPLAYGAIN_TRACK_GAIN");
+        if (!gainTag.empty()) {
+            // Typically formatted like "-6.50 dB" — atof reads the
+            // leading signed float and stops at the first non-numeric
+            // character, so the " dB" suffix is harmlessly ignored.
+            outInfo->trackGainDb = std::atof(gainTag.c_str());
+        }
+        std::string peakTag = readTag("REPLAYGAIN_TRACK_PEAK");
+        if (!peakTag.empty()) {
+            outInfo->trackPeakLinear = std::atof(peakTag.c_str());
+        }
     }
 
     LOGI("Opened %s: %dHz, %d ch, decoder-reported %d-bit", filePath.c_str(),
