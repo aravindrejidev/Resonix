@@ -11,6 +11,7 @@
 #include <oboe/Oboe.h>
 
 #include "AudioDecoder.h"
+#include "Limiter.h"
 #include "RingBuffer.h"
 
 namespace resonix {
@@ -18,9 +19,9 @@ namespace resonix {
 // Owns the full playback pipeline: AudioDecoder (FFmpeg) on a dedicated
 // decode thread -> RingBuffer (lock-free, double-precision) -> Oboe
 // AAudio Exclusive-mode callback, which applies the double-precision
-// DSP stage (currently just gain; the future EQ plugs in at the same
-// point) and converts to 32-bit float right before handing samples to
-// Oboe.
+// DSP chain (DVC gain * ReplayGain -> Peak Limiter; the future EQ plugs
+// in before the limiter) and converts to 32-bit float right before
+// handing samples to Oboe.
 //
 // Threading contract:
 //   - AudioDecoder's open()/seekTo()/decodeInto() are only ever called
@@ -52,11 +53,11 @@ public:
     // Direct Volume Control: linear gain multiplier applied in the
     // double-precision DSP stage in onAudioReady, ahead of the float32
     // cast Oboe sees — independent of Android's stream-volume ceiling.
-    // 1.0 = unity. Clamped to [0, kMaxGain] until the Peak Limiter
-    // (next stage) exists to safely allow pushing higher without clipping.
+    // 1.0 = unity. The Peak Limiter now catches any resulting overage,
+    // so this ceiling is higher than before the limiter existed.
     void setGain(double linearGain);
     double getGain() const { return mGain.load(std::memory_order_relaxed); }
-    static constexpr double kMaxGain = 2.0;  // +6.02 dB
+    static constexpr double kMaxGain = 4.0;  // +12.04 dB
 
     // True exactly once per track that reached end-of-stream on its own
     // (not a manual pauseTrack()), then resets — call periodically from
@@ -93,6 +94,20 @@ private:
     std::atomic<bool> mIsPlaying{false};
     std::atomic<double> mGain{1.0};
     std::atomic<bool> mTrackFinishedEvent{false};
+
+    // Per-track multiplier derived from REPLAYGAIN_TRACK_GAIN when
+    // playTrack() opens a file; 1.0 (no adjustment) if the file has no
+    // such tag. Combined multiplicatively with mGain, both feeding the
+    // limiter below — see onAudioReady.
+    std::atomic<double> mReplayGainMultiplier{1.0};
+
+    // process() is only ever called from the Oboe callback thread
+    // (onAudioReady). configure()/reset() only happen inside
+    // openStreamLocked(), which itself only runs after closeStreamLocked()
+    // has stopped the stream — so there's never a concurrent callback
+    // when this is touched from the calling thread, and no lock is
+    // needed around it.
+    PeakLimiter mLimiter;
 
     mutable std::mutex mTrackInfoLock;
     TrackInfo mTrackInfo;
