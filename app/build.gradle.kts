@@ -92,4 +92,7 @@ dependencies {
     ksp(libs.androidx.room.compiler)
 
     implementation(libs.androidx.documentfile)
+
+    implementation(libs.androidx.media3.session)
+    implementation(libs.androidx.media3.common)
 }
