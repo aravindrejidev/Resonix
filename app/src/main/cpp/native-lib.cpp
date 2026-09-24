@@ -176,6 +176,25 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeGetTrackPeak(
     return engine != nullptr ? engine->getAudioTrackInfo().trackPeakLinear : 1.0;
 }
 
+// --- Output Plugin System: AudioTrack fallback --------------------------
+
+JNIEXPORT jint JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativePullSamples(
+        JNIEnv *env, jobject /*thiz*/, jlong handle, jfloatArray outArray,
+        jint maxFrames, jint channelCount) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine == nullptr || outArray == nullptr) {
+        return 0;
+    }
+    jfloat *outPtr = env->GetFloatArrayElements(outArray, nullptr);
+    if (outPtr == nullptr) {
+        return 0;
+    }
+    int32_t framesWritten = engine->pullProcessedFrames(outPtr, maxFrames, channelCount);
+    env->ReleaseFloatArrayElements(outArray, outPtr, 0);
+    return framesWritten;
+}
+
 // --- Direct Volume Control ---------------------------------------------
 
 JNIEXPORT void JNICALL
