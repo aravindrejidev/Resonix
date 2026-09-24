@@ -33,10 +33,24 @@ AudioEngine::~AudioEngine() {
 bool AudioEngine::playTrack(const std::string &filePath) {
     stopDecodeThread();  // decoder access must be exclusive to us here
 
+    {
+        // Zeroed until decode below actually succeeds, so a caller
+        // checking getAudioTrackInfo() after a false return can tell
+        // "file wouldn't decode at all" (stays zeroed) apart from
+        // "decoded fine but Oboe couldn't open a stream" (see next block).
+        std::lock_guard<std::mutex> lock(mTrackInfoLock);
+        mTrackInfo = TrackInfo{};
+    }
+
     TrackInfo info;
     if (!mDecoder->open(filePath, &info)) {
         LOGE("Failed to open track: %s", filePath.c_str());
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mTrackInfoLock);
+        mTrackInfo = info;
     }
 
     double replayGainLinear = std::pow(10.0, info.trackGainDb / 20.0);
@@ -53,14 +67,13 @@ bool AudioEngine::playTrack(const std::string &filePath) {
         if (needsReopen) {
             closeStreamLocked();
             if (openStreamLocked(info.sampleRateHz, info.channelCount) != oboe::Result::OK) {
+                // mTrackInfo deliberately stays set to the successfully
+                // decoded info above — getAudioTrackInfo() after this
+                // false return is how a caller knows decode succeeded
+                // and only the native output stream failed to open.
                 return false;
             }
         }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(mTrackInfoLock);
-        mTrackInfo = info;
     }
 
     mIsPlaying.store(true, std::memory_order_relaxed);
@@ -115,6 +128,17 @@ void AudioEngine::setGain(double linearGain) {
 }
 
 oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCount) {
+    oboe::Result result = tryOpenStream(sampleRate, channelCount, oboe::AudioApi::Unspecified);
+    if (result != oboe::Result::OK) {
+        LOGW("Default (AAudio-preferred) open failed at %d Hz / %d ch: %s — "
+             "retrying with OpenSL ES forced",
+             sampleRate, channelCount, oboe::convertToText(result));
+        result = tryOpenStream(sampleRate, channelCount, oboe::AudioApi::OpenSLES);
+    }
+    return result;
+}
+
+oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount, oboe::AudioApi audioApi) {
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
             ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -128,21 +152,27 @@ oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCo
             ->setContentType(oboe::ContentType::Music)
             ->setDataCallback(this)
             ->setErrorCallback(this);
+    if (audioApi != oboe::AudioApi::Unspecified) {
+        builder.setAudioApi(audioApi);
+    }
 
     oboe::Result result = builder.openStream(mStream);
     if (result != oboe::Result::OK) {
-        LOGE("Failed to open stream at %d Hz / %d ch: %s",
-             sampleRate, channelCount, oboe::convertToText(result));
+        LOGE("Failed to open stream (api=%s) at %d Hz / %d ch: %s",
+             oboe::convertToText(audioApi), sampleRate, channelCount, oboe::convertToText(result));
         return result;
     }
 
     // Exclusive mode, like in Phase 1, is a request AAudio may not
     // grant — logged here since it directly determines bit-perfect-ness.
-    // The requested sample rate can also, in rare cases, not be granted
-    // exactly; swresample already normalized the decoder's output to
-    // exactly what we asked for, so a mismatch here means the actual
-    // hardware output path resampled, not us.
-    LOGI("Stream opened: sharingMode=%s, requested %dHz/%dch, granted %dHz/%dch/%s",
+    // (Exclusive sharing is an AAudio concept; under a forced OpenSL ES
+    // stream this setting is simply not applicable, which Oboe handles
+    // gracefully.) The requested sample rate can also, in rare cases,
+    // not be granted exactly; swresample already normalized the
+    // decoder's output to exactly what we asked for, so a mismatch here
+    // means the actual hardware output path resampled, not us.
+    LOGI("Stream opened: api=%s, sharingMode=%s, requested %dHz/%dch, granted %dHz/%dch/%s",
+         oboe::convertToText(mStream->getAudioApi()),
          oboe::convertToText(mStream->getSharingMode()),
          sampleRate, channelCount,
          mStream->getSampleRate(), mStream->getChannelCount(),
@@ -208,16 +238,20 @@ void AudioEngine::decodeThreadLoop() {
     }
 }
 
-oboe::DataCallbackResult AudioEngine::onAudioReady(
-        oboe::AudioStream *stream, void *audioData, int32_t numFrames) {
-    auto *out = static_cast<float *>(audioData);
-    int32_t channels = stream->getChannelCount();
+int32_t AudioEngine::processIntoFloatBuffer(float *out, int32_t maxFrames, int32_t channelCount) {
+    // Clamped to mReadScratch's fixed capacity (sized in tryOpenStream)
+    // rather than resized here, so this stays allocation-free — required
+    // for the Oboe real-time path, and harmless for the non-real-time
+    // AudioTrack fallback path too (it just loops for more).
+    int32_t maxFramesInScratch =
+            static_cast<int32_t>(mReadScratch.size() / static_cast<size_t>(channelCount));
+    int32_t framesToProcess = std::min(maxFrames, std::max(maxFramesInScratch, 0));
+    size_t samplesNeeded = static_cast<size_t>(framesToProcess) * channelCount;
 
-    int32_t framesToProcess = std::min(numFrames, static_cast<int32_t>(kMaxScratchFrames));
-    size_t samplesNeeded = static_cast<size_t>(framesToProcess) * channels;
-
-    size_t gotSamples = mRingBuffer->read(mReadScratch.data(), samplesNeeded);
-    size_t framesGot = gotSamples / static_cast<size_t>(channels);
+    size_t gotSamples = framesToProcess > 0
+            ? mRingBuffer->read(mReadScratch.data(), samplesNeeded)
+            : 0;
+    size_t framesGot = gotSamples / static_cast<size_t>(channelCount);
 
     // Double-precision DSP chain: DVC gain * ReplayGain, then the Peak
     // Limiter — computed per frame (not per sample) so its gain
@@ -230,15 +264,15 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
             mReplayGainMultiplier.load(std::memory_order_relaxed);
 
     for (size_t f = 0; f < framesGot; f++) {
-        size_t base = f * static_cast<size_t>(channels);
+        size_t base = f * static_cast<size_t>(channelCount);
         double frameBuf[kMaxLimiterChannels];
-        int32_t limiterChannels = std::min(channels, kMaxLimiterChannels);
+        int32_t limiterChannels = std::min(channelCount, kMaxLimiterChannels);
         for (int32_t c = 0; c < limiterChannels; c++) {
             frameBuf[c] = mReadScratch[base + static_cast<size_t>(c)] * combinedGain;
         }
         double limiterGain = mLimiter.process(frameBuf, limiterChannels);
 
-        for (int32_t c = 0; c < channels; c++) {
+        for (int32_t c = 0; c < channelCount; c++) {
             double sample = mReadScratch[base + static_cast<size_t>(c)] * combinedGain;
             out[base + static_cast<size_t>(c)] = static_cast<float>(sample * limiterGain);
         }
@@ -248,9 +282,20 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     for (size_t i = gotSamples; i < samplesNeeded; i++) {
         out[i] = 0.0f;
     }
-    // Defensive: if Oboe ever asks for more frames than kMaxScratchFrames
-    // in one callback, silence the tail rather than reading out of bounds.
-    for (int32_t f = framesToProcess; f < numFrames; f++) {
+
+    return framesToProcess;
+}
+
+oboe::DataCallbackResult AudioEngine::onAudioReady(
+        oboe::AudioStream *stream, void *audioData, int32_t numFrames) {
+    auto *out = static_cast<float *>(audioData);
+    int32_t channels = stream->getChannelCount();
+
+    int32_t framesProcessed = processIntoFloatBuffer(out, numFrames, channels);
+    // Defensive: if Oboe ever asks for more frames than processIntoFloatBuffer
+    // could provide (bounded by mReadScratch's fixed size), silence the
+    // tail rather than leaving it untouched.
+    for (int32_t f = framesProcessed; f < numFrames; f++) {
         for (int32_t c = 0; c < channels; c++) {
             out[static_cast<size_t>(f) * channels + c] = 0.0f;
         }
@@ -264,6 +309,18 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     }
 
     return oboe::DataCallbackResult::Continue;
+}
+
+int32_t AudioEngine::pullProcessedFrames(float *out, int32_t maxFrames, int32_t channelCount) {
+    int32_t framesWritten = processIntoFloatBuffer(out, maxFrames, channelCount);
+
+    bool trackDone = mDecoder->isEndOfStream() && mRingBuffer->availableToRead() == 0;
+    if (trackDone) {
+        mIsPlaying.store(false, std::memory_order_relaxed);
+        mTrackFinishedEvent.store(true, std::memory_order_relaxed);
+    }
+
+    return framesWritten;
 }
 
 void AudioEngine::onErrorAfterClose(oboe::AudioStream * /*audioStream*/, oboe::Result error) {
