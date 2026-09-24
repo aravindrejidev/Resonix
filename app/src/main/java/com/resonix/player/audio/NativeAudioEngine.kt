@@ -110,6 +110,19 @@ class NativeAudioEngine {
         return if (nativeHandle != 0L) nativeGetGain(nativeHandle) else 1.0
     }
 
+    /** Output Plugin System fallback: pulls up to maxFrames of fully
+     * DSP-processed (gain/ReplayGain/limiter) float32 audio, interleaved,
+     * into [outBuffer] (sized at least maxFrames * channelCount). Returns
+     * frames actually written. Used by AudioTrackOutputDriver when Oboe
+     * itself couldn't be used; not needed for normal Oboe playback. */
+    fun pullSamples(outBuffer: FloatArray, maxFrames: Int, channelCount: Int): Int {
+        return if (nativeHandle != 0L) {
+            nativePullSamples(nativeHandle, outBuffer, maxFrames, channelCount)
+        } else {
+            0
+        }
+    }
+
     fun release() {
         if (nativeHandle != 0L) {
             nativeDestroy(nativeHandle)
@@ -140,6 +153,12 @@ class NativeAudioEngine {
     private external fun nativeGetTrackPeak(handle: Long): Double
     private external fun nativeSetGain(handle: Long, linearGain: Double)
     private external fun nativeGetGain(handle: Long): Double
+    private external fun nativePullSamples(
+        handle: Long,
+        outBuffer: FloatArray,
+        maxFrames: Int,
+        channelCount: Int
+    ): Int
 
     companion object {
         init {
