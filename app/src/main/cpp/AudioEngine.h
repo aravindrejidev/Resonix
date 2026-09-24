@@ -64,6 +64,16 @@ public:
     // Kotlin to drive playback-queue auto-advance.
     bool consumeTrackFinishedEvent();
 
+    // Output Plugin System fallback path: pulls up to maxFrames of
+    // fully DSP-processed (gain/ReplayGain/limiter) float32 audio into
+    // a caller-provided buffer — the same processing onAudioReady uses,
+    // just driven by an external pull (a Kotlin AudioTrack write loop)
+    // instead of Oboe's callback. Returns frames actually written to
+    // `out` (always == maxFrames once a track is loaded: any underrun
+    // is silence-filled, same as the Oboe path). Not real-time-critical
+    // itself, but internally allocation-free like the Oboe path.
+    int32_t pullProcessedFrames(float *out, int32_t maxFrames, int32_t channelCount);
+
     // oboe::AudioStreamDataCallback
     oboe::DataCallbackResult onAudioReady(
             oboe::AudioStream *audioStream, void *audioData, int32_t numFrames) override;
@@ -73,8 +83,24 @@ public:
     void onErrorAfterClose(oboe::AudioStream *audioStream, oboe::Result error) override;
 
 private:
+    // Tries the default (AAudio-preferred) API first; if that fails to
+    // open at all, retries once with OpenSL ES explicitly forced before
+    // giving up. On minSdk 26 AAudio is always technically available, so
+    // this specifically covers "AAudio exists per the API level but this
+    // device's implementation fails to open a stream" — a real, if rare,
+    // device-specific failure mode — rather than pre-API-26 Android,
+    // which this app doesn't target anyway.
     oboe::Result openStreamLocked(int32_t sampleRate, int32_t channelCount);
+    oboe::Result tryOpenStream(int32_t sampleRate, int32_t channelCount, oboe::AudioApi audioApi);
     void closeStreamLocked();
+
+    // Core DSP: reads from the ring buffer, applies gain*ReplayGain then
+    // the Peak Limiter per frame, writes float32 into `out`, silence-
+    // fills any underrun. Shared by onAudioReady and pullProcessedFrames
+    // so the two output paths can never drift out of sync with each
+    // other's processing. Returns frames written (== maxFrames, clamped
+    // to mReadScratch's fixed capacity — see kMaxScratchFrames in the .cpp).
+    int32_t processIntoFloatBuffer(float *out, int32_t maxFrames, int32_t channelCount);
     void startDecodeThread();
     void stopDecodeThread();
     void decodeThreadLoop();
