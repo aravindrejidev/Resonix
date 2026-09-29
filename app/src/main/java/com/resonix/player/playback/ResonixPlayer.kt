@@ -127,10 +127,17 @@ class ResonixPlayer(
 }
 
 private fun Track.toMediaItemData(): SimpleBasePlayer.MediaItemData {
+    val extras = android.os.Bundle().apply {
+        putInt("sampleRateHz", sampleRateHz)
+        putInt("bitDepth", bitDepth)
+        putString("format", format)
+        putString("albumArtUri", albumArtUri)
+    }
     val metadata = MediaMetadata.Builder()
         .setTitle(title)
         .setArtist(artist)
         .setAlbumTitle(album)
+        .setExtras(extras)
         .build()
     val mediaItem = MediaItem.Builder()
         .setMediaId(contentUri)
