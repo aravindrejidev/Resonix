@@ -2,9 +2,14 @@ package com.resonix.player.playback
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.os.Bundle
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import com.resonix.player.MainActivity
 import com.resonix.player.audio.NativeAudioEngine
 import com.resonix.player.data.AppDatabase
@@ -71,8 +76,39 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
+        val sessionCallback = object : MediaSession.Callback {
+            override fun onConnect(
+                session: MediaSession,
+                controller: MediaSession.ControllerInfo
+            ): MediaSession.ConnectionResult {
+                val defaultResult = super.onConnect(session, controller)
+                val sessionCommands = defaultResult.availableSessionCommands.buildUpon()
+                    .add(SessionCommand(COMMAND_PLAY_FOLDER, Bundle.EMPTY))
+                    .build()
+                return MediaSession.ConnectionResult.accept(
+                    sessionCommands, defaultResult.availablePlayerCommands
+                )
+            }
+
+            override fun onCustomCommand(
+                session: MediaSession,
+                controller: MediaSession.ControllerInfo,
+                customCommand: SessionCommand,
+                args: Bundle
+            ): ListenableFuture<SessionResult> {
+                if (customCommand.customAction == COMMAND_PLAY_FOLDER) {
+                    val folderPath = args.getString(ARG_FOLDER_PATH).orEmpty()
+                    val shuffle = args.getBoolean(ARG_SHUFFLE, false)
+                    serviceScope.launch { queueManager.playFolder(folderPath, shuffle) }
+                    return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                }
+                return super.onCustomCommand(session, controller, customCommand, args)
+            }
+        }
+
         mediaSession = MediaSession.Builder(this, player)
             .setSessionActivity(sessionActivityIntent)
+            .setCallback(sessionCallback)
             .build()
 
         // Reflect queue changes (new track started, folder played) into
@@ -108,5 +144,11 @@ class PlaybackService : MediaSessionService() {
         player.release()
         mediaSession.release()
         super.onDestroy()
+    }
+
+    companion object {
+        const val COMMAND_PLAY_FOLDER = "com.resonix.player.PLAY_FOLDER"
+        const val ARG_FOLDER_PATH = "folder_path"
+        const val ARG_SHUFFLE = "shuffle"
     }
 }
