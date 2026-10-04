@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.BackHandler
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
@@ -15,9 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -27,15 +26,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.resonix.player.data.ScannedFolder
 import com.resonix.player.data.Track
 import com.resonix.player.ui.PlayerViewModel
 import com.resonix.player.ui.components.FloatingBottomBar
 import com.resonix.player.ui.components.MiniPlayer
 import com.resonix.player.ui.components.NavTab
+import com.resonix.player.ui.screens.FolderDetailScreen
 import com.resonix.player.ui.screens.LibraryScreen
 import com.resonix.player.ui.screens.NowPlayingScreen
+import com.resonix.player.ui.screens.RepoScreen
 import com.resonix.player.ui.theme.ResonixBlack
-import com.resonix.player.ui.theme.ResonixTextSecondary
 import com.resonix.player.ui.theme.ResonixTheme
 
 class MainActivity : ComponentActivity() {
@@ -56,25 +57,31 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Home currently shows the same content as Library (there's no separate
- * "home" concept — recents, suggestions — built yet) and Repo is a
- * placeholder; both are natural next additions. Floating overlays
- * (mini-player, capsule nav) sit above whichever tab is active; Now
- * Playing slides in as a full-screen overlay on top of everything.
+ * Home currently shows the same content as Library — there's no
+ * separate "home" concept (recents, suggestions) built yet; a natural
+ * next addition. Floating overlays (mini-player, capsule nav) sit above
+ * whichever tab is active; Now Playing slides in as a full-screen
+ * overlay on top of everything.
  */
 @Composable
 private fun ResonixApp(viewModel: PlayerViewModel) {
     var selectedTab by remember { mutableStateOf(NavTab.LIBRARY) }
     var showNowPlaying by remember { mutableStateOf(false) }
+    var openFolder by remember { mutableStateOf<ScannedFolder?>(null) }
 
     val tracks by viewModel.libraryTracks.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
+    val scannedFolders by viewModel.scannedFolders.collectAsState()
+    val scanningFolderUri by viewModel.scanningFolderUri.collectAsState()
 
     fun openTrack(track: Track) {
         viewModel.playTrackFolder(track)
         showNowPlaying = true
     }
+
+    BackHandler(enabled = showNowPlaying) { showNowPlaying = false }
+    BackHandler(enabled = !showNowPlaying && openFolder != null) { openFolder = null }
 
     Box(modifier = Modifier.fillMaxSize()) {
         when (selectedTab) {
@@ -85,7 +92,34 @@ private fun ResonixApp(viewModel: PlayerViewModel) {
                 onScanClick = { viewModel.scanLibrary() },
                 modifier = Modifier.fillMaxSize()
             )
-            NavTab.REPO -> RepoPlaceholder(modifier = Modifier.fillMaxSize())
+            NavTab.REPO -> {
+                val currentFolder = openFolder
+                if (currentFolder == null) {
+                    RepoScreen(
+                        scannedFolders = scannedFolders,
+                        scanningFolderUri = scanningFolderUri,
+                        onAddFolder = { uri -> viewModel.addFolder(uri) },
+                        onRescanFolder = { rootUri -> viewModel.rescanFolder(rootUri) },
+                        onOpenFolder = { folder -> openFolder = folder },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    val folderTracks by remember(currentFolder.rootUri) {
+                        viewModel.tracksUnderRoot(currentFolder.rootUri)
+                    }.collectAsState(initial = emptyList())
+
+                    FolderDetailScreen(
+                        folder = currentFolder,
+                        tracks = folderTracks,
+                        onTrackClick = { track ->
+                            viewModel.playTrackFolder(track)
+                            showNowPlaying = true
+                        },
+                        onBackClick = { openFolder = null },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
         }
 
         Column(
@@ -129,16 +163,5 @@ private fun ResonixApp(viewModel: PlayerViewModel) {
                 modifier = Modifier.fillMaxSize()
             )
         }
-    }
-}
-
-@Composable
-private fun RepoPlaceholder(modifier: Modifier = Modifier) {
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Text(
-            text = "Repo — coming next",
-            style = MaterialTheme.typography.bodyMedium,
-            color = ResonixTextSecondary
-        )
     }
 }
