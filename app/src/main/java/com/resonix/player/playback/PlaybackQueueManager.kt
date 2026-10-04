@@ -44,11 +44,13 @@ class PlaybackQueueManager(
     val hasNext: Boolean get() = currentIndex + 1 < queue.size
     val hasPrevious: Boolean get() = currentIndex > 0
 
-    /** Loads every track directly inside [folderPath] (see
-     * TrackDao.getTracksInFolder — not recursive into subfolders) and
-     * starts playing from the first one. */
-    suspend fun playFolder(folderPath: String, shuffle: Boolean = false) {
-        val tracks = trackDao.getTracksInFolder(folderPath)
+    /** Loads every track directly inside [folderPath] under
+     * [rootFolderUri] (see TrackDao.getTracksInFolder — not recursive
+     * into subfolders) and starts playing from the first one. Pass ""
+     * for rootFolderUri for MediaStore-sourced tracks (they have no
+     * folder concept, so this plays them all together as one queue). */
+    suspend fun playFolder(rootFolderUri: String, folderPath: String, shuffle: Boolean = false) {
+        val tracks = trackDao.getTracksInFolder(rootFolderUri, folderPath)
         originalOrder = tracks
         shuffled = shuffle
         queue = if (shuffle) tracks.shuffled() else tracks
