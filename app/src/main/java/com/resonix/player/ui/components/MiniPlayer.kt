@@ -1,117 +1,157 @@
 package com.resonix.player.ui.components
 
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.resonix.player.ui.rememberAlbumArt
-import com.resonix.player.ui.theme.ResonixSurface
-import com.resonix.player.ui.theme.ResonixSurfaceVariant
-import com.resonix.player.ui.theme.ResonixTextPrimary
-import com.resonix.player.ui.theme.ResonixTextSecondary
+import com.resonix.player.ui.NowPlayingUiState
+import com.resonix.player.ui.neo.NeoAlbumArt
+import com.resonix.player.ui.neo.NeoIconButton
+import com.resonix.player.ui.neo.NeoIcons
+import com.resonix.player.ui.neo.neoInset
+import com.resonix.player.ui.neo.neoSurface
+import com.resonix.player.ui.neo.rememberHaptic
+import com.resonix.player.ui.theme.LocalNeoColors
+import com.resonix.player.ui.theme.NeoType
 
+/**
+ * Compact player that floats above the navigation bar: art, title, play / pause with a progress
+ * ring around it, and next. Tap anywhere else to open Now Playing.
+ */
 @Composable
 fun MiniPlayer(
-    title: String,
-    artist: String,
-    albumArtUri: String,
-    isPlaying: Boolean,
-    onPlayPauseClick: () -> Unit,
-    onNextClick: () -> Unit,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    state: NowPlayingUiState,
+    showArt: Boolean,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val art by rememberAlbumArt(albumArtUri)
+    val neo = LocalNeoColors.current
+    val haptic = rememberHaptic()
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val depth = animateFloatAsState(
+        targetValue = if (pressed) 0.6f else 0f,
+        animationSpec = spring(dampingRatio = 0.8f, stiffness = 500f),
+        label = "miniPlayerDepth",
+    )
+    val progress = if (state.durationMs > 0L) {
+        (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
 
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(ResonixSurfaceVariant.copy(alpha = 0.92f))
-            .clickable(onClick = onClick)
-            .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .height(78.dp)
+            .neoSurface(cornerRadius = 30.dp, elevation = 8.dp, depth = { depth.value })
+            .clickable(interactionSource = source, indication = null) {
+                haptic()
+                onOpen()
+            }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(ResonixSurface),
-            contentAlignment = Alignment.Center
+                .size(54.dp)
+                .neoInset(cornerRadius = 18.dp, elevation = 3.dp)
+                .padding(4.dp),
         ) {
-            val currentArt = art
-            if (currentArt != null) {
-                Image(
-                    bitmap = currentArt,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(44.dp)
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Filled.MusicNote,
-                    contentDescription = null,
-                    tint = ResonixTextSecondary
-                )
-            }
+            NeoAlbumArt(
+                uri = if (showArt) state.albumArtUri.ifBlank { state.contentUri } else "",
+                modifier = Modifier.fillMaxSize(),
+                cornerRadius = 14.dp,
+            )
         }
-
-        Spacer(modifier = Modifier.width(10.dp))
-
+        Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
+                text = state.title.ifBlank { "Unknown title" },
+                color = neo.textPrimary,
+                style = NeoType.body,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = artist,
-                style = MaterialTheme.typography.bodySmall,
-                color = ResonixTextSecondary,
+                text = state.artist.ifBlank { "Unknown artist" },
+                color = neo.textSecondary,
+                style = NeoType.caption,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
             )
         }
-
-        IconButton(onClick = onPlayPauseClick) {
-            Icon(
-                imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (isPlaying) "Pause" else "Play",
-                tint = ResonixTextPrimary
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .drawBehind {
+                    val stroke = 3.dp.toPx()
+                    val ringTopLeft = Offset(stroke / 2f, stroke / 2f)
+                    val ringSize = Size(size.width - stroke, size.height - stroke)
+                    drawArc(
+                        color = neo.textTertiary.copy(alpha = 0.25f),
+                        startAngle = -90f,
+                        sweepAngle = 360f,
+                        useCenter = false,
+                        topLeft = ringTopLeft,
+                        size = ringSize,
+                        style = Stroke(width = stroke),
+                    )
+                    if (progress > 0f) {
+                        drawArc(
+                            color = neo.accent,
+                            startAngle = -90f,
+                            sweepAngle = 360f * progress,
+                            useCenter = false,
+                            topLeft = ringTopLeft,
+                            size = ringSize,
+                            style = Stroke(width = stroke, cap = StrokeCap.Round),
+                        )
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            NeoIconButton(
+                icon = if (state.isPlaying) NeoIcons.Pause else NeoIcons.Play,
+                onClick = onPlayPause,
+                diameter = 44.dp,
+                contentDescription = if (state.isPlaying) "Pause" else "Play",
+                tint = neo.accent,
             )
         }
-        IconButton(onClick = onNextClick) {
-            Icon(
-                imageVector = Icons.Filled.SkipNext,
-                contentDescription = "Next",
-                tint = ResonixTextPrimary
-            )
-        }
+        Spacer(Modifier.width(4.dp))
+        NeoIconButton(
+            icon = NeoIcons.Next,
+            onClick = onNext,
+            diameter = 40.dp,
+            iconSize = 20.dp,
+            contentDescription = "Next",
+        )
     }
 }

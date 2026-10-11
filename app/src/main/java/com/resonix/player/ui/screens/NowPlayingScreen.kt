@@ -1,226 +1,254 @@
 package com.resonix.player.ui.screens
 
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.resonix.player.ui.NowPlayingUiState
-import com.resonix.player.ui.components.GlassBackground
-import com.resonix.player.ui.components.QualityBadge
-import com.resonix.player.ui.components.formatQualityLabel
-import com.resonix.player.ui.rememberAlbumArt
-import com.resonix.player.ui.theme.ResonixCrimson
-import com.resonix.player.ui.theme.ResonixSurfaceVariant
-import com.resonix.player.ui.theme.ResonixTextPrimary
-import com.resonix.player.ui.theme.ResonixTextSecondary
+import com.resonix.player.ui.neo.NeoAccentIconButton
+import com.resonix.player.ui.neo.NeoAlbumArt
+import com.resonix.player.ui.neo.NeoHiResTag
+import com.resonix.player.ui.neo.NeoIconButton
+import com.resonix.player.ui.neo.NeoIcons
+import com.resonix.player.ui.neo.NeoQualityPill
+import com.resonix.player.ui.neo.NeoSlider
+import com.resonix.player.ui.neo.formatDuration
+import com.resonix.player.ui.neo.isHiRes
+import com.resonix.player.ui.neo.neoBackground
+import com.resonix.player.ui.neo.neoInset
+import com.resonix.player.ui.neo.neoRaised
+import com.resonix.player.ui.theme.LocalNeoColors
+import com.resonix.player.ui.theme.NeoType
+import kotlinx.coroutines.delay
 
+/** Full-screen player: big album art on a raised plate, seek bar, transport controls. */
 @Composable
 fun NowPlayingScreen(
-    uiState: NowPlayingUiState,
-    onPlayPauseClick: () -> Unit,
-    onNextClick: () -> Unit,
-    onPreviousClick: () -> Unit,
+    state: NowPlayingUiState,
+    keepScreenOn: Boolean,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onPrevious: () -> Unit,
     onSeek: (Long) -> Unit,
-    onBackClick: () -> Unit,
-    modifier: Modifier = Modifier
+    onClose: () -> Unit,
+    onOpenTools: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val art by rememberAlbumArt(uiState.albumArtUri)
+    val neo = LocalNeoColors.current
 
-    // Local only — there's no favorites concept in the backend/DB yet,
-    // so this doesn't persist across tracks or app restarts.
-    var isFavorite by remember(uiState.title) { mutableStateOf(false) }
+    val view = LocalView.current
+    DisposableEffect(keepScreenOn) {
+        val previous = view.keepScreenOn
+        view.keepScreenOn = keepScreenOn
+        onDispose { view.keepScreenOn = previous }
+    }
 
-    // Dragged locally so the slider doesn't fight the periodic position
-    // updates while the user is actively seeking.
-    var draggingPositionMs by remember { mutableStateOf<Long?>(null) }
-
-    Box(modifier = modifier.fillMaxSize()) {
-        GlassBackground(albumArt = art, modifier = Modifier.fillMaxSize())
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                IconButton(onClick = onBackClick) {
-                    Icon(
-                        imageVector = Icons.Filled.KeyboardArrowDown,
-                        contentDescription = "Close",
-                        tint = ResonixTextPrimary
-                    )
-                }
-                IconButton(onClick = { isFavorite = !isFavorite }) {
-                    Icon(
-                        imageVector = if (isFavorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                        contentDescription = "Favorite",
-                        tint = if (isFavorite) ResonixCrimson else ResonixTextPrimary
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            Box(
-                modifier = Modifier
-                    .size(280.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(ResonixSurfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                val currentArt = art
-                if (currentArt != null) {
-                    Image(
-                        bitmap = currentArt,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Filled.MusicNote,
-                        contentDescription = null,
-                        tint = ResonixTextSecondary,
-                        modifier = Modifier.size(64.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            Text(
-                text = uiState.title.ifEmpty { "Nothing playing" },
-                style = MaterialTheme.typography.headlineSmall,
-                color = ResonixTextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = uiState.artist,
-                style = MaterialTheme.typography.bodyMedium,
-                color = ResonixTextSecondary
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            QualityBadge(text = formatQualityLabel(uiState.format, uiState.bitDepth, uiState.sampleRateHz))
-
-            Spacer(modifier = Modifier.height(28.dp))
-
-            val sliderMax = uiState.durationMs.coerceAtLeast(1L).toFloat()
-            val sliderValue = (draggingPositionMs ?: uiState.positionMs).toFloat().coerceIn(0f, sliderMax)
-            Slider(
-                value = sliderValue,
-                onValueChange = { draggingPositionMs = it.toLong() },
-                onValueChangeFinished = {
-                    draggingPositionMs?.let(onSeek)
-                    draggingPositionMs = null
-                },
-                valueRange = 0f..sliderMax,
-                colors = SliderDefaults.colors(
-                    thumbColor = ResonixCrimson,
-                    activeTrackColor = ResonixCrimson,
-                    inactiveTrackColor = ResonixSurfaceVariant
-                )
-            )
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(
-                    text = formatMs(draggingPositionMs ?: uiState.positionMs),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = ResonixTextSecondary
-                )
-                Text(
-                    text = formatMs(uiState.durationMs),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = ResonixTextSecondary
-                )
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(32.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onPreviousClick, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        imageVector = Icons.Filled.SkipPrevious,
-                        contentDescription = "Previous",
-                        tint = ResonixTextPrimary,
-                        modifier = Modifier.size(34.dp)
-                    )
-                }
-                FilledIconButton(
-                    onClick = onPlayPauseClick,
-                    modifier = Modifier.size(72.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = ResonixCrimson)
-                ) {
-                    Icon(
-                        imageVector = if (uiState.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = if (uiState.isPlaying) "Pause" else "Play",
-                        tint = Color.White,
-                        modifier = Modifier.size(34.dp)
-                    )
-                }
-                IconButton(onClick = onNextClick, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        imageVector = Icons.Filled.SkipNext,
-                        contentDescription = "Next",
-                        tint = ResonixTextPrimary,
-                        modifier = Modifier.size(34.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
+    // While the thumb is being dragged (and for a moment after release, until the player
+    // reports the new position) show the dragged value instead of the polled one.
+    var dragFraction by remember { mutableStateOf<Float?>(null) }
+    var dragging by remember { mutableStateOf(false) }
+    var releaseToken by remember { mutableIntStateOf(0) }
+    LaunchedEffect(releaseToken) {
+        if (releaseToken > 0) {
+            delay(450)
+            if (!dragging) dragFraction = null
         }
     }
-}
+    val playedFraction = if (state.durationMs > 0L) {
+        (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val shownFraction = dragFraction ?: playedFraction
+    val shownPositionMs = (shownFraction * state.durationMs).toLong()
 
-private fun formatMs(ms: Long): String {
-    val totalSeconds = ms / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return "%d:%02d".format(minutes, seconds)
+    val artScale by animateFloatAsState(
+        targetValue = if (state.isPlaying) 1f else 0.94f,
+        animationSpec = spring(dampingRatio = 0.65f, stiffness = 220f),
+        label = "nowPlayingArtScale",
+    )
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .neoBackground()
+            // Swallow touches so nothing underneath this overlay reacts to them.
+            .pointerInput(Unit) { detectTapGestures { } }
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        // Top bar.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            NeoIconButton(icon = NeoIcons.Down, onClick = onClose, contentDescription = "Close player")
+            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(text = "NOW PLAYING", color = neo.accent, style = NeoType.overline)
+                if (state.format.isNotBlank()) {
+                    Text(
+                        text = state.format.uppercase(),
+                        color = neo.textTertiary,
+                        style = NeoType.tiny,
+                        maxLines = 1,
+                    )
+                }
+            }
+            NeoIconButton(icon = NeoIcons.Tools, onClick = onOpenTools, contentDescription = "Sound tools")
+        }
+
+        // Album art on its plate — as large as the screen allows.
+        BoxWithConstraints(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            val side = (minOf(maxWidth, maxHeight) - 36.dp).coerceAtLeast(120.dp)
+            Column(
+                modifier = Modifier
+                    .size(side)
+                    .graphicsLayer {
+                        scaleX = artScale
+                        scaleY = artScale
+                    }
+                    .neoRaised(cornerRadius = 40.dp, elevation = 14.dp)
+                    .padding(14.dp)
+                    .neoInset(cornerRadius = 28.dp, elevation = 6.dp)
+                    .padding(6.dp),
+            ) {
+                NeoAlbumArt(
+                    uri = state.albumArtUri.ifBlank { state.contentUri },
+                    modifier = Modifier.fillMaxSize(),
+                    cornerRadius = 22.dp,
+                    sizePx = 1024,
+                    iconSize = 72.dp,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = state.title.ifBlank { "Unknown title" },
+            color = neo.textPrimary,
+            style = NeoType.title,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = state.artist.ifBlank { "Unknown artist" },
+            color = neo.textSecondary,
+            style = NeoType.body,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(Modifier.height(14.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (state.format.isNotBlank()) NeoQualityPill(state.format.uppercase())
+            if (state.bitDepth > 0) NeoQualityPill("${state.bitDepth}-bit")
+            if (state.sampleRateHz > 0) {
+                val khz = state.sampleRateHz / 1000f
+                val khzText = if (khz % 1f == 0f) khz.toInt().toString() else "%.1f".format(java.util.Locale.US, khz)
+                NeoQualityPill("$khzText kHz")
+            }
+            if (isHiRes(state.bitDepth, state.sampleRateHz)) NeoHiResTag()
+        }
+
+        Spacer(Modifier.height(20.dp))
+        NeoSlider(
+            value = shownFraction,
+            onValueChange = {
+                dragging = true
+                dragFraction = it
+            },
+            onValueChangeFinished = {
+                dragging = false
+                dragFraction?.let { fraction -> onSeek((fraction * state.durationMs).toLong()) }
+                releaseToken++
+            },
+            enabled = state.durationMs > 0L,
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(text = formatDuration(shownPositionMs), color = neo.textSecondary, style = NeoType.caption)
+            Text(text = formatDuration(state.durationMs), color = neo.textSecondary, style = NeoType.caption)
+        }
+
+        Spacer(Modifier.height(18.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 22.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            NeoIconButton(
+                icon = NeoIcons.Previous,
+                onClick = onPrevious,
+                diameter = 62.dp,
+                iconSize = 28.dp,
+                contentDescription = "Previous",
+            )
+            NeoAccentIconButton(
+                icon = if (state.isPlaying) NeoIcons.Pause else NeoIcons.Play,
+                onClick = onPlayPause,
+                diameter = 86.dp,
+                iconSize = 40.dp,
+                contentDescription = if (state.isPlaying) "Pause" else "Play",
+            )
+            NeoIconButton(
+                icon = NeoIcons.Next,
+                onClick = onNext,
+                diameter = 62.dp,
+                iconSize = 28.dp,
+                contentDescription = "Next",
+            )
+        }
+    }
 }

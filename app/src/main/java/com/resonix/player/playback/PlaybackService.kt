@@ -100,7 +100,8 @@ class PlaybackService : MediaSessionService() {
                     val rootFolderUri = args.getString(ARG_ROOT_FOLDER_URI).orEmpty()
                     val folderPath = args.getString(ARG_FOLDER_PATH).orEmpty()
                     val shuffle = args.getBoolean(ARG_SHUFFLE, false)
-                    serviceScope.launch { queueManager.playFolder(rootFolderUri, folderPath, shuffle) }
+                    val startUri = args.getString(ARG_START_URI)
+                    serviceScope.launch { queueManager.playFolder(rootFolderUri, folderPath, shuffle, startUri) }
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
                 return super.onCustomCommand(session, controller, customCommand, args)
@@ -152,5 +153,6 @@ class PlaybackService : MediaSessionService() {
         const val ARG_ROOT_FOLDER_URI = "root_folder_uri"
         const val ARG_FOLDER_PATH = "folder_path"
         const val ARG_SHUFFLE = "shuffle"
+        const val ARG_START_URI = "start_uri"
     }
 }

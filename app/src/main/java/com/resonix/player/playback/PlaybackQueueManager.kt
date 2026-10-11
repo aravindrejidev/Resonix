@@ -49,12 +49,24 @@ class PlaybackQueueManager(
      * into subfolders) and starts playing from the first one. Pass ""
      * for rootFolderUri for MediaStore-sourced tracks (they have no
      * folder concept, so this plays them all together as one queue). */
-    suspend fun playFolder(rootFolderUri: String, folderPath: String, shuffle: Boolean = false) {
+    suspend fun playFolder(
+        rootFolderUri: String,
+        folderPath: String,
+        shuffle: Boolean = false,
+        startContentUri: String? = null,
+    ) {
         val tracks = trackDao.getTracksInFolder(rootFolderUri, folderPath)
         originalOrder = tracks
         shuffled = shuffle
-        queue = if (shuffle) tracks.shuffled() else tracks
-        currentIndex = 0
+        // When the UI asks to start from a specific track (the one the user
+        // tapped), begin there; when shuffling, that track simply leads the queue.
+        val start = startContentUri?.let { uri -> tracks.firstOrNull { it.contentUri == uri } }
+        queue = when {
+            !shuffle -> tracks
+            start != null -> listOf(start) + (tracks - start).shuffled()
+            else -> tracks.shuffled()
+        }
+        currentIndex = if (shuffle || start == null) 0 else tracks.indexOf(start)
         playCurrent()
     }
 

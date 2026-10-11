@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaMetadata
@@ -19,6 +20,7 @@ import com.resonix.player.data.MediaStoreScanner
 import com.resonix.player.data.ScannedFolder
 import com.resonix.player.data.Track
 import com.resonix.player.playback.PlaybackService
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +29,8 @@ import kotlinx.coroutines.launch
 
 data class NowPlayingUiState(
     val hasTrack: Boolean = false,
+    /** contentUri of the track that is loaded (the MediaItem id) — lets lists highlight it. */
+    val contentUri: String = "",
     val title: String = "",
     val artist: String = "",
     val albumArtUri: String = "",
@@ -37,6 +41,9 @@ data class NowPlayingUiState(
     val bitDepth: Int = 0,
     val format: String = ""
 )
+
+/** A running sleep timer: playback is paused when [endsAtElapsedMs] (SystemClock.elapsedRealtime) is reached. */
+data class SleepTimerState(val totalMinutes: Int, val endsAtElapsedMs: Long)
 
 /**
  * Connects the UI to PlaybackService purely through a Media3
@@ -50,6 +57,13 @@ data class NowPlayingUiState(
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
     private var mediaController: MediaController? = null
+
+    /** UI preferences (theme, accent, sort order, Tools values …). */
+    val settings = AppSettings(application)
+
+    private val _sleepTimer = MutableStateFlow<SleepTimerState?>(null)
+    val sleepTimer: StateFlow<SleepTimerState?> = _sleepTimer.asStateFlow()
+    private var sleepJob: Job? = null
 
     private val _uiState = MutableStateFlow(NowPlayingUiState())
     val uiState: StateFlow<NowPlayingUiState> = _uiState.asStateFlow()
@@ -76,6 +90,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             val extras = mediaMetadata.extras
             _uiState.value = _uiState.value.copy(
                 hasTrack = true,
+                contentUri = mediaController?.currentMediaItem?.mediaId ?: "",
                 title = mediaMetadata.title?.toString() ?: "",
                 artist = mediaMetadata.artist?.toString() ?: "",
                 albumArtUri = extras?.getString("albumArtUri") ?: "",
@@ -95,6 +110,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 val controller = controllerFuture.get()
                 mediaController = controller
                 controller.addListener(playerListener)
+                // The listener only reports *changes* — pick up what is already playing
+                // when the app is reopened while the service kept going in the background.
+                if (controller.currentMediaItem != null) {
+                    playerListener.onMediaMetadataChanged(controller.mediaMetadata)
+                    playerListener.onIsPlayingChanged(controller.isPlaying)
+                }
             },
             MoreExecutors.directExecutor()
         )
@@ -149,18 +170,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
      * per-folder queues right now.
      */
     fun playTrackFolder(track: Track, shuffle: Boolean = false) {
-        playFolder(track.rootFolderUri, track.folderPath, shuffle)
+        playFolder(track.rootFolderUri, track.folderPath, shuffle, startContentUri = track.contentUri)
     }
 
     /** Used by the Repo screen to play every track under a scanned root
      * (folderPath "" there means "the root itself", not "MediaStore" —
      * rootFolderUri is what keeps those apart, see TrackDao). */
-    fun playFolder(rootFolderUri: String, folderPath: String, shuffle: Boolean = false) {
+    fun playFolder(
+        rootFolderUri: String,
+        folderPath: String,
+        shuffle: Boolean = false,
+        startContentUri: String? = null,
+    ) {
         val controller = mediaController ?: return
         val args = Bundle().apply {
             putString(PlaybackService.ARG_ROOT_FOLDER_URI, rootFolderUri)
             putString(PlaybackService.ARG_FOLDER_PATH, folderPath)
             putBoolean(PlaybackService.ARG_SHUFFLE, shuffle)
+            if (startContentUri != null) putString(PlaybackService.ARG_START_URI, startContentUri)
         }
         controller.sendCustomCommand(
             SessionCommand(PlaybackService.COMMAND_PLAY_FOLDER, Bundle.EMPTY),
@@ -199,6 +226,25 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
      * what the Repo screen shows when a folder is opened. */
     fun tracksUnderRoot(rootUri: String) =
         AppDatabase.getInstance(getApplication()).trackDao().getTracksUnderRootFlow(rootUri)
+
+    /**
+     * Pauses playback after [minutes]; 0 cancels. Lives in the ViewModel, so it survives rotation
+     * and the app being backgrounded, but not the app being swiped away.
+     */
+    fun setSleepTimer(minutes: Int) {
+        sleepJob?.cancel()
+        if (minutes <= 0) {
+            _sleepTimer.value = null
+            return
+        }
+        val durationMs = minutes * 60_000L
+        _sleepTimer.value = SleepTimerState(minutes, SystemClock.elapsedRealtime() + durationMs)
+        sleepJob = viewModelScope.launch {
+            delay(durationMs)
+            mediaController?.pause()
+            _sleepTimer.value = null
+        }
+    }
 
     override fun onCleared() {
         mediaController?.removeListener(playerListener)

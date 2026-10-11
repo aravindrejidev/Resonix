@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Neumorphic surface colour — keep in sync with ui/theme/Color.kt (NeoColors.surface). -->
+    <color name="resonix_window_background">#E3E7EE</color>
+</resources>

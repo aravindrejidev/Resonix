@@ -6,6 +6,6 @@
     <style name="Theme.Resonix" parent="android:Theme.Material.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowBackground">@color/resonix_window_background</item>
     </style>
 </resources>
