@@ -1,5 +1,7 @@
 package com.resonix.player.ui.neo
 
+import com.resonix.player.audio.displayFormatName
+import com.resonix.player.audio.isHiResAudio
 import java.util.Locale
 
 /** 3:07, or 1:02:09 for anything an hour or longer. */
@@ -26,24 +28,34 @@ fun formatTotalTime(ms: Long): String {
     }
 }
 
-/** "FLAC · 24-bit / 96 kHz" — same wording the old UI used. */
-fun formatQualityLabel(format: String, bitDepth: Int, sampleRateHz: Int): String {
+/**
+ * "FLAC · 24-bit / 96 kHz" for lossless files, "MP3 · 320 kbps" for lossy ones (their bit
+ * depth is meaningless, their bitrate is what you care about).
+ */
+fun formatQualityLabel(format: String, bitDepth: Int, sampleRateHz: Int, bitrateBps: Long = 0L): String {
     val parts = mutableListOf<String>()
-    if (format.isNotBlank()) parts.add(format.uppercase(Locale.ROOT))
-    if (bitDepth > 0 && sampleRateHz > 0) {
-        val khz = sampleRateHz / 1000f
-        val khzText = if (khz % 1f == 0f) khz.toInt().toString() else String.format(Locale.US, "%.1f", khz)
-        parts.add("$bitDepth-bit / $khzText kHz")
-    } else if (sampleRateHz > 0) {
-        val khz = sampleRateHz / 1000f
-        val khzText = if (khz % 1f == 0f) khz.toInt().toString() else String.format(Locale.US, "%.1f", khz)
-        parts.add("$khzText kHz")
+    val name = displayFormatName(format)
+    if (name.isNotEmpty()) parts.add(name)
+
+    val khz = sampleRateHz / 1000f
+    val khzText = if (khz % 1f == 0f) khz.toInt().toString() else String.format(Locale.US, "%.1f", khz)
+    when {
+        bitDepth > 0 && sampleRateHz > 0 -> parts.add("$bitDepth-bit / $khzText kHz")
+        bitDepth <= 0 && bitrateBps > 0L -> parts.add("${(bitrateBps + 500L) / 1000L} kbps")
+        sampleRateHz > 0 -> parts.add("$khzText kHz")
     }
     return parts.joinToString(" · ")
 }
 
-/** Anything above CD quality (16-bit / 44.1–48 kHz). */
+/**
+ * Anything above CD quality (16-bit / 44.1–48 kHz). The scanner only records a bit depth
+ * for lossless files (it is 0 for MP3 / AAC …), so a lossy file is never flagged by depth.
+ */
 fun isHiRes(bitDepth: Int, sampleRateHz: Int): Boolean = bitDepth > 16 || sampleRateHz > 48_000
+
+/** Same, but also refuses to call a lossy file "hi-res" just because of its sample rate. */
+fun isHiRes(format: String, bitDepth: Int, sampleRateHz: Int): Boolean =
+    isHiResAudio(format, bitDepth, sampleRateHz)
 
 /** "just now", "5 min ago", "3 days ago" … */
 fun formatRelativeTime(epochSec: Long, nowMs: Long = System.currentTimeMillis()): String {
