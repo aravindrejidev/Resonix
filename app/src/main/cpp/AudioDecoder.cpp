@@ -1,7 +1,14 @@
 #include "AudioDecoder.h"
 
 #include <android/log.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 
 #define LOG_TAG "ResonixDecoder"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -28,6 +35,73 @@ int sampleFormatToBitDepth(AVSampleFormat fmt) {
     }
 }
 
+constexpr int kIoBufferSize = 64 * 1024;
+
+}  // namespace
+
+// State behind the AVIOContext used by openFd(). Reads use pread() with our
+// own cursor, so they neither depend on nor disturb the descriptor's shared
+// file offset. Non-regular files (pipes / sockets some providers hand out)
+// fall back to plain sequential read() and are reported as non-seekable.
+struct FdSource {
+    int fd = -1;
+    bool seekable = false;
+    int64_t size = -1;
+    int64_t pos = 0;
+};
+
+namespace {
+
+int readFromFd(void *opaque, uint8_t *buf, int bufSize) {
+    auto *src = static_cast<FdSource *>(opaque);
+    ssize_t n;
+    do {
+        n = src->seekable ? pread64(src->fd, buf, static_cast<size_t>(bufSize), src->pos)
+                          : read(src->fd, buf, static_cast<size_t>(bufSize));
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) {
+        return AVERROR(errno);
+    }
+    if (n == 0) {
+        return AVERROR_EOF;
+    }
+    src->pos += n;
+    return static_cast<int>(n);
+}
+
+int64_t seekInFd(void *opaque, int64_t offset, int whence) {
+    auto *src = static_cast<FdSource *>(opaque);
+    if (whence & AVSEEK_SIZE) {
+        return src->size >= 0 ? src->size : AVERROR(ENOSYS);
+    }
+    if (!src->seekable) {
+        return AVERROR(ESPIPE);
+    }
+    whence &= ~AVSEEK_FORCE;
+    int64_t target;
+    switch (whence) {
+        case SEEK_SET:
+            target = offset;
+            break;
+        case SEEK_CUR:
+            target = src->pos + offset;
+            break;
+        case SEEK_END:
+            if (src->size < 0) {
+                return AVERROR(ENOSYS);
+            }
+            target = src->size + offset;
+            break;
+        default:
+            return AVERROR(EINVAL);
+    }
+    if (target < 0) {
+        return AVERROR(EINVAL);
+    }
+    src->pos = target;
+    return target;
+}
+
 }  // namespace
 
 AudioDecoder::AudioDecoder() {
@@ -48,7 +122,62 @@ bool AudioDecoder::open(const std::string &filePath, TrackInfo *outInfo) {
         LOGE("avformat_open_input failed for %s", filePath.c_str());
         return false;
     }
+    return finishOpen(outInfo, filePath.c_str());
+}
 
+bool AudioDecoder::openFd(int fd, TrackInfo *outInfo) {
+    close();
+
+    if (fd < 0) {
+        LOGE("openFd: invalid file descriptor");
+        return false;
+    }
+    int owned = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (owned < 0) {
+        LOGE("openFd: dup failed (errno %d)", errno);
+        return false;
+    }
+
+    mFdSource = new FdSource();
+    mFdSource->fd = owned;
+    struct stat st;
+    if (fstat(owned, &st) == 0 && S_ISREG(st.st_mode)) {
+        mFdSource->seekable = true;
+        mFdSource->size = static_cast<int64_t>(st.st_size);
+    }
+
+    auto *ioBuffer = static_cast<unsigned char *>(av_malloc(kIoBufferSize));
+    if (ioBuffer == nullptr) {
+        releaseFfmpegState();
+        return false;
+    }
+    mAvio = avio_alloc_context(ioBuffer, kIoBufferSize, 0, mFdSource, readFromFd, nullptr,
+                               mFdSource->seekable ? seekInFd : nullptr);
+    if (mAvio == nullptr) {
+        av_free(ioBuffer);
+        releaseFfmpegState();
+        return false;
+    }
+
+    mFormatCtx = avformat_alloc_context();
+    if (mFormatCtx == nullptr) {
+        releaseFfmpegState();
+        return false;
+    }
+    mFormatCtx->pb = mAvio;
+    mFormatCtx->flags |= AVFMT_FLAG_CUSTOM_IO;
+
+    // With custom IO the url is only a probing hint; none is needed.
+    if (avformat_open_input(&mFormatCtx, nullptr, nullptr, nullptr) < 0) {
+        LOGE("avformat_open_input failed for fd (seekable=%d, size=%lld)",
+             mFdSource->seekable ? 1 : 0, static_cast<long long>(mFdSource->size));
+        releaseFfmpegState();  // mFormatCtx was already freed by FFmpeg; frees our IO + fd
+        return false;
+    }
+    return finishOpen(outInfo, "fd");
+}
+
+bool AudioDecoder::finishOpen(TrackInfo *outInfo, const char *label) {
     if (avformat_find_stream_info(mFormatCtx, nullptr) < 0) {
         LOGE("avformat_find_stream_info failed");
         releaseFfmpegState();
@@ -69,18 +198,40 @@ bool AudioDecoder::open(const std::string &filePath, TrackInfo *outInfo) {
     mEndOfStream = false;
 
     if (outInfo != nullptr) {
-        AVCodecParameters *params = mFormatCtx->streams[mStreamIndex]->codecpar;
+        AVStream *stream = mFormatCtx->streams[mStreamIndex];
+        AVCodecParameters *params = stream->codecpar;
         outInfo->sampleRateHz = mOutputSampleRate;
         outInfo->channelCount = mOutputChannelCount;
         outInfo->bitDepth = params->bits_per_raw_sample > 0
                 ? params->bits_per_raw_sample
                 : sampleFormatToBitDepth(mCodecCtx->sample_fmt);
         outInfo->bitrateBps = params->bit_rate;
-        outInfo->durationMs = mFormatCtx->duration > 0
-                ? mFormatCtx->duration * 1000 / AV_TIME_BASE
-                : 0;
-        const AVCodec *codec = avcodec_find_decoder(params->codec_id);
-        outInfo->formatName = (codec != nullptr && codec->name != nullptr) ? codec->name : "unknown";
+
+        int64_t durationMs = 0;
+        if (mFormatCtx->duration > 0) {
+            durationMs = mFormatCtx->duration * 1000 / AV_TIME_BASE;
+        } else if (stream->duration > 0 && stream->time_base.den > 0) {
+            // Container has no overall duration — fall back to the stream's own.
+            durationMs = static_cast<int64_t>(stream->duration * av_q2d(stream->time_base) * 1000.0);
+        }
+        outInfo->durationMs = durationMs;
+
+        // The codec's own name ("mp3", "aac", "flac", "pcm_s16le"), not the name of the
+        // decoder implementation FFmpeg happened to pick ("mp3float").
+        const AVCodecDescriptor *descriptor = avcodec_descriptor_get(params->codec_id);
+        outInfo->formatName = (descriptor != nullptr && descriptor->name != nullptr)
+                ? descriptor->name
+                : "unknown";
+
+        // "Bit depth" only means something for lossless / PCM audio. A lossy codec's
+        // decoder merely outputs float or 16-bit samples — reporting that as the
+        // file's bit depth made every MP3 look like a 32-bit hi-res file.
+        bool lossyOnly = descriptor != nullptr &&
+                (descriptor->props & AV_CODEC_PROP_LOSSY) != 0 &&
+                (descriptor->props & AV_CODEC_PROP_LOSSLESS) == 0;
+        if (lossyOnly) {
+            outInfo->bitDepth = 0;
+        }
 
         auto readTag = [this](const char *key) -> std::string {
             AVDictionaryEntry *entry = av_dict_get(mFormatCtx->metadata, key, nullptr, 0);
@@ -110,7 +261,7 @@ bool AudioDecoder::open(const std::string &filePath, TrackInfo *outInfo) {
         }
     }
 
-    LOGI("Opened %s: %dHz, %d ch, decoder-reported %d-bit", filePath.c_str(),
+    LOGI("Opened %s: %dHz, %d ch, decoder-reported %d-bit", label,
          mOutputSampleRate, mOutputChannelCount,
          outInfo != nullptr ? outInfo->bitDepth : -1);
 
@@ -178,9 +329,17 @@ bool AudioDecoder::setupResampler() {
 }
 
 void AudioDecoder::pushConvertedFrame(RingBuffer &ringBuffer) {
-    if (mFrame->pts != AV_NOPTS_VALUE) {
-        double seconds = mFrame->pts * av_q2d(mFormatCtx->streams[mStreamIndex]->time_base);
+    int64_t pts = mFrame->best_effort_timestamp != AV_NOPTS_VALUE
+            ? mFrame->best_effort_timestamp
+            : mFrame->pts;
+    if (pts != AV_NOPTS_VALUE) {
+        double seconds = pts * av_q2d(mFormatCtx->streams[mStreamIndex]->time_base);
         mCurrentPositionMs.store(static_cast<int64_t>(seconds * 1000), std::memory_order_relaxed);
+    } else if (mOutputSampleRate > 0) {
+        // No timestamps in this stream — keep time by counting decoded samples.
+        mCurrentPositionMs.fetch_add(
+                static_cast<int64_t>(mFrame->nb_samples) * 1000 / mOutputSampleRate,
+                std::memory_order_relaxed);
     }
 
     int outSamples = swr_get_out_samples(mSwrCtx, mFrame->nb_samples);
@@ -205,7 +364,14 @@ void AudioDecoder::pushConvertedFrame(RingBuffer &ringBuffer) {
     // than dropping audio. Only ever called from the decode thread, so a
     // short busy-wait here does not affect real-time audio callback timing.
     while (written < sampleCount) {
-        written += ringBuffer.write(mConvertScratch.data() + written, sampleCount - written);
+        size_t n = ringBuffer.write(mConvertScratch.data() + written, sampleCount - written);
+        written += n;
+        if (n == 0) {
+            if (mAbort.load(std::memory_order_relaxed)) {
+                return;  // being stopped — the buffer is about to be flushed anyway
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
     }
 }
 
@@ -273,6 +439,19 @@ void AudioDecoder::releaseFfmpegState() {
     }
     if (mFormatCtx != nullptr) {
         avformat_close_input(&mFormatCtx);
+    }
+    if (mAvio != nullptr) {
+        // With AVFMT_FLAG_CUSTOM_IO FFmpeg never frees the IO context; and it
+        // may have swapped the buffer, so free the *current* one.
+        av_freep(&mAvio->buffer);
+        avio_context_free(&mAvio);
+    }
+    if (mFdSource != nullptr) {
+        if (mFdSource->fd >= 0) {
+            ::close(mFdSource->fd);
+        }
+        delete mFdSource;
+        mFdSource = nullptr;
     }
     mStreamIndex = -1;
     mOutputSampleRate = 0;
