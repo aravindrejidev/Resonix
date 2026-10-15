@@ -1,6 +1,7 @@
 package com.resonix.player
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -57,6 +58,9 @@ import com.resonix.player.ui.SettingsState
 import com.resonix.player.ui.components.FloatingNavBar
 import com.resonix.player.ui.components.MiniPlayer
 import com.resonix.player.ui.components.NavTab
+import com.resonix.player.ui.components.NeoToast
+import com.resonix.player.util.AppMessages
+import kotlinx.coroutines.delay
 import com.resonix.player.ui.neo.neoBackground
 import com.resonix.player.ui.screens.HomeScreen
 import com.resonix.player.ui.screens.NowPlayingScreen
@@ -136,7 +140,40 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
         if (granted) viewModel.scanLibrary() else permissionLauncher.launch(audioPermission)
     }
 
+    // Android 13+: ask once for permission to show the playback notification (lock-screen /
+    // headset controls). Playback works whether or not it is granted.
+    val notificationPermissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            val granted = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            val prefs = context.getSharedPreferences("resonix_library", Context.MODE_PRIVATE)
+            if (!granted && !prefs.getBoolean("asked_notifications", false)) {
+                prefs.edit().putBoolean("asked_notifications", true).apply()
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
     val playTrack: (Track) -> Unit = { track -> viewModel.playTrackFolder(track) }
+
+    // Short messages from the playback service and the scanners ("Can't play …", "7 songs found …").
+    var toast by remember { mutableStateOf<ToastMessage?>(null) }
+    var lastToastText by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        AppMessages.messages.collect { text ->
+            lastToastText = text
+            toast = ToastMessage(text)
+        }
+    }
+    LaunchedEffect(toast) {
+        if (toast != null) {
+            delay(4500)
+            toast = null
+        }
+    }
 
     // A restored "player open" flag must not pop the player up later when playback restarts.
     LaunchedEffect(nowPlaying.hasTrack) {
@@ -242,6 +279,13 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             AnimatedVisibility(
+                visible = toast != null,
+                enter = slideInVertically(tween(220)) { it / 2 } + fadeIn(tween(220)),
+                exit = slideOutVertically(tween(180)) { it / 2 } + fadeOut(tween(180)),
+            ) {
+                NeoToast(text = lastToastText, onDismiss = { toast = null })
+            }
+            AnimatedVisibility(
                 visible = nowPlaying.hasTrack,
                 enter = slideInVertically(tween(260)) { it / 2 } + fadeIn(tween(260)),
                 exit = slideOutVertically(tween(200)) { it / 2 } + fadeOut(tween(200)),
@@ -299,3 +343,6 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
         }
     }
 }
+
+/** One toast; a fresh instance per message so repeating the same text still restarts the timer. */
+private class ToastMessage(val text: String)
