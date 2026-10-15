@@ -1,8 +1,13 @@
 package com.resonix.player.playback
 
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.Bundle
+import androidx.core.content.ContextCompat
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -13,9 +18,12 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.resonix.player.MainActivity
 import com.resonix.player.audio.NativeAudioEngine
 import com.resonix.player.data.AppDatabase
+import android.util.Log
+import com.resonix.player.util.AppMessages
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -41,10 +49,26 @@ class PlaybackService : MediaSessionService() {
     private var gainBeforeDucking: Double = 1.0
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /** Headphones unplugged / Bluetooth dropped: pause instead of blasting the music out of the speaker. */
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                engine.pauseTrack()
+                player.refreshFromEngine()
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
 
         engine = NativeAudioEngine()
+        ContextCompat.registerReceiver(
+            this,
+            becomingNoisyReceiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         val trackDao = AppDatabase.getInstance(this).trackDao()
         queueManager = PlaybackQueueManager(this, engine, trackDao)
         player = ResonixPlayer(mainLooper, engine, queueManager)
@@ -101,7 +125,17 @@ class PlaybackService : MediaSessionService() {
                     val folderPath = args.getString(ARG_FOLDER_PATH).orEmpty()
                     val shuffle = args.getBoolean(ARG_SHUFFLE, false)
                     val startUri = args.getString(ARG_START_URI)
-                    serviceScope.launch { queueManager.playFolder(rootFolderUri, folderPath, shuffle, startUri) }
+                    val sortKey = args.getString(ARG_SORT_KEY)
+                    val sortAscending = args.getBoolean(ARG_SORT_ASCENDING, true)
+                    serviceScope.launch {
+                        try {
+                            queueManager.playFolder(rootFolderUri, folderPath, shuffle, startUri, sortKey, sortAscending)
+                        } catch (e: Exception) {
+                            // Without this a database error here would take the whole app down.
+                            Log.e(TAG, "playFolder failed", e)
+                            AppMessages.post("Couldn't start playback")
+                        }
+                    }
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
                 return super.onCustomCommand(session, controller, customCommand, args)
@@ -117,20 +151,28 @@ class PlaybackService : MediaSessionService() {
         // the session, and request audio focus whenever something
         // actually starts rather than unconditionally at service start.
         serviceScope.launch {
-            queueManager.currentTrack.collect { track ->
-                if (track != null) audioFocusManager.requestFocus()
-                player.setNowPlaying(track, engine.isPlaying())
+            queueManager.nowPlaying.collect { playing ->
+                if (playing != null) audioFocusManager.requestFocus()
+                player.setNowPlaying(playing)
             }
         }
 
-        // Same polling approach the UI uses for its own position display
-        // — also drives queue auto-advance and keeps the session's
-        // reported position current.
+        // A track starting to load / finishing loading changes the session's
+        // state (buffering vs playing) even though nothing else did.
         serviceScope.launch {
+            queueManager.isLoading.collect { player.refreshFromEngine() }
+        }
+
+        // Polling loop: checks for a finished track often (so the next one
+        // starts promptly — there is no gapless pre-loading yet), and keeps
+        // the session's reported position current twice a second.
+        serviceScope.launch {
+            var ticks = 0
             while (true) {
                 queueManager.checkForAutoAdvance()
-                player.refreshFromEngine()
-                delay(500)
+                if (ticks % 5 == 0) player.refreshFromEngine()
+                ticks++
+                delay(100)
             }
         }
     }
@@ -140,6 +182,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(becomingNoisyReceiver)
+        serviceScope.cancel()
         audioFocusManager.abandonFocus()
         queueManager.release()
         engine.release()
@@ -149,10 +193,13 @@ class PlaybackService : MediaSessionService() {
     }
 
     companion object {
+        private const val TAG = "PlaybackService"
         const val COMMAND_PLAY_FOLDER = "com.resonix.player.PLAY_FOLDER"
         const val ARG_ROOT_FOLDER_URI = "root_folder_uri"
         const val ARG_FOLDER_PATH = "folder_path"
         const val ARG_SHUFFLE = "shuffle"
         const val ARG_START_URI = "start_uri"
+        const val ARG_SORT_KEY = "sort_key"
+        const val ARG_SORT_ASCENDING = "sort_ascending"
     }
 }
