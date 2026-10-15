@@ -31,7 +31,35 @@ AudioEngine::~AudioEngine() {
 }
 
 bool AudioEngine::playTrack(const std::string &filePath) {
+    return startPlayback(
+            [&](TrackInfo *info) { return mDecoder->open(filePath, info); },
+            filePath.c_str());
+}
+
+bool AudioEngine::playTrackFd(int fd) {
+    return startPlayback(
+            [&](TrackInfo *info) { return mDecoder->openFd(fd, info); },
+            "fd");
+}
+
+bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDecoder, const char *label) {
+    struct LoadingGuard {
+        std::atomic<bool> &flag;
+        explicit LoadingGuard(std::atomic<bool> &f) : flag(f) { flag.store(true, std::memory_order_relaxed); }
+        ~LoadingGuard() { flag.store(false, std::memory_order_relaxed); }
+    } loadingGuard(mLoading);
+
+    mIsPlaying.store(false, std::memory_order_relaxed);  // not playing while the new file loads
     stopDecodeThread();  // decoder access must be exclusive to us here
+
+    // Drop whatever the previous track left queued *before* the (possibly
+    // slow) open below, so its tail can't leak out as a blip while the new
+    // file loads. The decode thread is stopped, so this thread is the only
+    // producer; the audio callback may still be running, which is exactly
+    // what flushFromProducer() is safe against.
+    mRingBuffer->flushFromProducer();
+    mPendingSeekMs.store(-1, std::memory_order_relaxed);
+    mTrackFinishedEvent.store(false, std::memory_order_relaxed);
 
     {
         // Zeroed until decode below actually succeeds, so a caller
@@ -43,8 +71,13 @@ bool AudioEngine::playTrack(const std::string &filePath) {
     }
 
     TrackInfo info;
-    if (!mDecoder->open(filePath, &info)) {
-        LOGE("Failed to open track: %s", filePath.c_str());
+    if (!openDecoder(&info)) {
+        LOGE("Failed to open track: %s", label);
+        return false;
+    }
+    if (info.sampleRateHz <= 0 || info.channelCount <= 0) {
+        LOGE("Track has no usable audio format: %s", label);
+        mDecoder->close();
         return false;
     }
 
@@ -58,7 +91,7 @@ bool AudioEngine::playTrack(const std::string &filePath) {
 
     {
         std::lock_guard<std::mutex> lock(mStreamLock);
-        mRingBuffer->reset();
+        mRingBuffer->flushFromProducer();
 
         bool needsReopen = !mStream ||
                 mStream->getSampleRate() != info.sampleRateHz ||
@@ -110,7 +143,27 @@ void AudioEngine::seekTo(int64_t positionMs) {
 }
 
 int64_t AudioEngine::getCurrentPositionMs() const {
-    return mDecoder->getCurrentPositionMs();
+    int64_t decodedMs = mDecoder->getCurrentPositionMs();
+
+    int32_t sampleRate;
+    int32_t channels;
+    int64_t durationMs;
+    {
+        std::lock_guard<std::mutex> lock(mTrackInfoLock);
+        sampleRate = mTrackInfo.sampleRateHz;
+        channels = mTrackInfo.channelCount;
+        durationMs = mTrackInfo.durationMs;
+    }
+    if (sampleRate <= 0 || channels <= 0) {
+        return decodedMs;
+    }
+
+    size_t queuedSamples = mRingBuffer->availableToRead();
+    if (queuedSamples == 0 && mDecoder->isEndOfStream() && durationMs > 0) {
+        return durationMs;  // everything decoded has been played
+    }
+    int64_t queuedMs = static_cast<int64_t>(queuedSamples / static_cast<size_t>(channels)) * 1000 / sampleRate;
+    return std::max<int64_t>(0, decodedMs - queuedMs);
 }
 
 TrackInfo AudioEngine::getAudioTrackInfo() const {
@@ -200,12 +253,14 @@ void AudioEngine::startDecodeThread() {
     if (mDecodeThreadRunning.load(std::memory_order_relaxed)) {
         return;
     }
+    mDecoder->setAbort(false);
     mDecodeThreadRunning.store(true, std::memory_order_relaxed);
     mDecodeThread = std::thread(&AudioEngine::decodeThreadLoop, this);
 }
 
 void AudioEngine::stopDecodeThread() {
     mDecodeThreadRunning.store(false, std::memory_order_relaxed);
+    mDecoder->setAbort(true);  // unblock a decodeInto() waiting for buffer space
     if (mDecodeThread.joinable()) {
         mDecodeThread.join();
     }
@@ -218,7 +273,7 @@ void AudioEngine::decodeThreadLoop() {
         int64_t pendingSeek = mPendingSeekMs.exchange(-1, std::memory_order_relaxed);
         if (pendingSeek >= 0) {
             mDecoder->seekTo(pendingSeek);
-            mRingBuffer->reset();
+            mRingBuffer->flushFromProducer();
         }
 
         size_t freeSpace = kRingBufferCapacitySamples - mRingBuffer->availableToRead();
@@ -301,7 +356,8 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
         }
     }
 
-    bool trackDone = mDecoder->isEndOfStream() && mRingBuffer->availableToRead() == 0;
+    bool trackDone = !mLoading.load(std::memory_order_relaxed) &&
+                     mDecoder->isEndOfStream() && mRingBuffer->availableToRead() == 0;
     if (trackDone) {
         mIsPlaying.store(false, std::memory_order_relaxed);
         mTrackFinishedEvent.store(true, std::memory_order_relaxed);
