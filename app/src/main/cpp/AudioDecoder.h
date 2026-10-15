@@ -16,6 +16,8 @@ extern "C" {
 
 namespace resonix {
 
+struct FdSource;  // custom-IO state for openFd(); defined in AudioDecoder.cpp
+
 // Metadata about the currently open track, as actually decoded — not
 // read from file tags. sampleRateHz/bitDepth/channelCount describe what
 // came out of the decoder, which is what AudioEngine actually asks Oboe
@@ -61,6 +63,21 @@ public:
     // and not the Oboe callback thread — this does file I/O.
     bool open(const std::string &filePath, TrackInfo *outInfo);
 
+    // Same as open(), but reads straight from an already-open file
+    // descriptor instead of re-opening a path. This is what makes Storage
+    // Access Framework / MediaStore files work: the fd that
+    // ContentResolver.openFileDescriptor() hands out is usable by this
+    // process, but re-opening it through "/proc/self/fd/N" is a brand-new
+    // open() that Android's storage layer denies (EACCES) for files the app
+    // has no direct path access to. The decoder dup()s [fd], so the caller
+    // may close its own copy as soon as this returns.
+    bool openFd(int fd, TrackInfo *outInfo);
+
+    // Asks a decodeInto() that is currently waiting for ring-buffer space
+    // to give up, so the decode thread can be joined promptly (pause with a
+    // full buffer + a new track request used to be able to hang there).
+    void setAbort(bool abort) { mAbort.store(abort, std::memory_order_relaxed); }
+
     void close();
 
     // Decodes and pushes into ringBuffer until either the buffer is full
@@ -85,6 +102,7 @@ public:
     bool isEndOfStream() const { return mEndOfStream.load(std::memory_order_relaxed); }
 
 private:
+    bool finishOpen(TrackInfo *outInfo, const char *label);
     bool openBestAudioStream();
     bool setupResampler();
     void releaseFfmpegState();
@@ -93,6 +111,8 @@ private:
     AVFormatContext *mFormatCtx = nullptr;
     AVCodecContext *mCodecCtx = nullptr;
     SwrContext *mSwrCtx = nullptr;
+    AVIOContext *mAvio = nullptr;      // only for openFd()
+    FdSource *mFdSource = nullptr;     // only for openFd(); owns the dup()ed fd
     AVPacket *mPacket = nullptr;
     AVFrame *mFrame = nullptr;
 
@@ -103,6 +123,7 @@ private:
     std::vector<double> mConvertScratch;
     std::atomic<int64_t> mCurrentPositionMs{0};
     std::atomic<bool> mEndOfStream{false};
+    std::atomic<bool> mAbort{false};
 };
 
 }  // namespace resonix
