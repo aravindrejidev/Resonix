@@ -39,7 +39,8 @@ public:
     size_t write(const double *data, size_t count) {
         size_t writeIdx = mWriteIndex.load(std::memory_order_relaxed);
         size_t readIdx = mReadIndex.load(std::memory_order_acquire);
-        size_t freeSpace = mCapacity - (writeIdx - readIdx);
+        size_t used = writeIdx >= readIdx ? writeIdx - readIdx : 0;
+        size_t freeSpace = used < mCapacity ? mCapacity - used : 0;
         size_t toWrite = std::min(count, freeSpace);
 
         for (size_t i = 0; i < toWrite; i++) {
@@ -53,27 +54,53 @@ public:
     // Consumer side (Oboe audio callback only). Returns how many samples
     // were actually read; less than count means underrun — the caller
     // must fill the remainder with silence, never block waiting.
+    //
+    // The read index is committed with a compare-exchange: if the producer
+    // flushed the buffer (flushFromProducer) while this call was copying
+    // out, the exchange fails and the chunk is dropped (reported as an
+    // underrun) instead of replaying stale audio or corrupting the indices.
     size_t read(double *data, size_t count) {
-        size_t readIdx = mReadIndex.load(std::memory_order_relaxed);
+        size_t readIdx = mReadIndex.load(std::memory_order_acquire);
         size_t writeIdx = mWriteIndex.load(std::memory_order_acquire);
-        size_t available = writeIdx - readIdx;
-        size_t toRead = std::min(count, available);
+        size_t available = writeIdx >= readIdx ? writeIdx - readIdx : 0;
+        size_t toRead = std::min(std::min(count, available), mCapacity);
+        if (toRead == 0) {
+            return 0;
+        }
 
         for (size_t i = 0; i < toRead; i++) {
             data[i] = mBuffer[(readIdx + i) % mCapacity];
         }
 
-        mReadIndex.store(readIdx + toRead, std::memory_order_release);
+        if (!mReadIndex.compare_exchange_strong(readIdx, readIdx + toRead,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+            return 0;  // flushed underneath us — treat as an underrun
+        }
         return toRead;
     }
 
     size_t availableToRead() const {
-        return mWriteIndex.load(std::memory_order_acquire) -
-               mReadIndex.load(std::memory_order_relaxed);
+        // Read index first: it can never pass the write index, so loading
+        // the write index second guarantees write >= read here.
+        size_t readIdx = mReadIndex.load(std::memory_order_acquire);
+        size_t writeIdx = mWriteIndex.load(std::memory_order_acquire);
+        return writeIdx >= readIdx ? writeIdx - readIdx : 0;
     }
 
-    // Only safe to call when both producer and consumer are stopped
-    // (e.g. before starting a new track).
+    // Discards everything currently buffered. Call it from the producer
+    // side only (the decode thread, or whoever is acting as the producer
+    // while the decode thread is stopped). It never touches mWriteIndex,
+    // and moving the read index up to it is safe even while the audio
+    // callback is running, because read() commits with a compare-exchange.
+    void flushFromProducer() {
+        mReadIndex.store(mWriteIndex.load(std::memory_order_acquire),
+                         std::memory_order_release);
+    }
+
+    // Hard reset of both indices. Only safe when BOTH producer and
+    // consumer are stopped — prefer flushFromProducer() anywhere the
+    // audio callback could still be running.
     void reset() {
         mReadIndex.store(0, std::memory_order_relaxed);
         mWriteIndex.store(0, std::memory_order_relaxed);
