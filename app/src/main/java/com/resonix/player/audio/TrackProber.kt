@@ -16,25 +16,42 @@ class TrackProber {
         nativeHandle = nativeCreate()
     }
 
+    /** Probes a file by path. Only works for files this process can open by
+     * path itself (e.g. its own cache) — for content:// documents use [probeFd]. */
     fun probe(filePath: String): AudioTrackInfo? {
         if (nativeHandle == 0L || !nativeProbe(nativeHandle, filePath)) {
             return null
         }
-        return AudioTrackInfo(
-            sampleRateHz = nativeGetSampleRate(nativeHandle),
-            bitDepth = nativeGetBitDepth(nativeHandle),
-            channelCount = nativeGetChannelCount(nativeHandle),
-            bitrateBps = nativeGetBitrateBps(nativeHandle),
-            durationMs = nativeGetDurationMs(nativeHandle),
-            format = nativeGetFormatName(nativeHandle),
-            title = nativeGetTitle(nativeHandle),
-            artist = nativeGetArtist(nativeHandle),
-            album = nativeGetAlbum(nativeHandle),
-            year = nativeGetYear(nativeHandle),
-            trackGainDb = nativeGetTrackGainDb(nativeHandle),
-            trackPeakLinear = nativeGetTrackPeak(nativeHandle)
-        )
+        return readInfo()
     }
+
+    /**
+     * Probes an already-open file descriptor (from
+     * `ContentResolver.openFileDescriptor`). The native side dup()s it, so the
+     * caller still owns — and must close — its own descriptor. This is the
+     * method to use for Storage Access Framework / MediaStore files.
+     */
+    fun probeFd(fd: Int): AudioTrackInfo? {
+        if (nativeHandle == 0L || !nativeProbeFd(nativeHandle, fd)) {
+            return null
+        }
+        return readInfo()
+    }
+
+    private fun readInfo(): AudioTrackInfo = AudioTrackInfo(
+        sampleRateHz = nativeGetSampleRate(nativeHandle),
+        bitDepth = nativeGetBitDepth(nativeHandle),
+        channelCount = nativeGetChannelCount(nativeHandle),
+        bitrateBps = nativeGetBitrateBps(nativeHandle),
+        durationMs = nativeGetDurationMs(nativeHandle),
+        format = nativeGetFormatName(nativeHandle),
+        title = nativeGetTitle(nativeHandle),
+        artist = nativeGetArtist(nativeHandle),
+        album = nativeGetAlbum(nativeHandle),
+        year = nativeGetYear(nativeHandle),
+        trackGainDb = nativeGetTrackGainDb(nativeHandle),
+        trackPeakLinear = nativeGetTrackPeak(nativeHandle)
+    )
 
     fun release() {
         if (nativeHandle != 0L) {
@@ -46,6 +63,7 @@ class TrackProber {
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
     private external fun nativeProbe(handle: Long, filePath: String): Boolean
+    private external fun nativeProbeFd(handle: Long, fd: Int): Boolean
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetBitDepth(handle: Long): Int
     private external fun nativeGetChannelCount(handle: Long): Int
