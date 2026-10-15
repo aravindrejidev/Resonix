@@ -491,20 +491,7 @@ fun NeoDivider(modifier: Modifier = Modifier) {
 @Composable
 fun Modifier.neoBackground(): Modifier {
     val neo = LocalNeoColors.current
-    return this
-        .background(neo.surface)
-        .drawBehind {
-            drawRect(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        neo.lit(neo.surface).copy(alpha = if (neo.isDark) 0.60f else 0.70f),
-                        Color.Transparent,
-                    ),
-                    center = Offset.Zero,
-                    radius = size.maxDimension * 0.9f,
-                ),
-            )
-        }
+    return this.background(neo.surface)
 }
 
 // ───────────────────────────── small pieces ─────────────────────────────
