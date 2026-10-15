@@ -2,6 +2,7 @@
 #define RESONIX_AUDIO_ENGINE_H
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,10 +43,19 @@ public:
     AudioEngine &operator=(const AudioEngine &) = delete;
 
     bool playTrack(const std::string &filePath);
+
+    // Plays straight from an already-open file descriptor (the engine dup()s
+    // it, so the caller may close its copy right after this returns). This is
+    // the path the app uses: SAF / MediaStore files can't be re-opened by path.
+    bool playTrackFd(int fd);
+
     void pauseTrack();
     void resumeTrack();
     void seekTo(int64_t positionMs);
 
+    // Position of the audio being *heard* — the decoder runs several seconds
+    // ahead of the speaker (ring buffer), so its own position is corrected
+    // by whatever is still queued.
     int64_t getCurrentPositionMs() const;
     TrackInfo getAudioTrackInfo() const;
     bool isPlaying() const { return mIsPlaying.load(std::memory_order_relaxed); }
@@ -83,6 +93,11 @@ public:
     void onErrorAfterClose(oboe::AudioStream *audioStream, oboe::Result error) override;
 
 private:
+    // Shared by playTrack() / playTrackFd(): [openDecoder] opens the file on
+    // mDecoder and fills the TrackInfo; everything after that (output stream,
+    // ring buffer, decode thread) is identical for both sources.
+    bool startPlayback(const std::function<bool(TrackInfo *)> &openDecoder, const char *label);
+
     // Tries the default (AAudio-preferred) API first; if that fails to
     // open at all, retries once with OpenSL ES explicitly forced before
     // giving up. On minSdk 26 AAudio is always technically available, so
@@ -120,6 +135,11 @@ private:
     std::atomic<bool> mIsPlaying{false};
     std::atomic<double> mGain{1.0};
     std::atomic<bool> mTrackFinishedEvent{false};
+    // True while startPlayback() is swapping tracks. The audio callback must
+    // not read "decoder at end-of-stream + empty buffer" as "track finished"
+    // during that window — the old track's end-of-stream flag is still set
+    // while its buffer has just been flushed.
+    std::atomic<bool> mLoading{false};
 
     // Per-track multiplier derived from REPLAYGAIN_TRACK_GAIN when
     // playTrack() opens a file; 1.0 (no adjustment) if the file has no
