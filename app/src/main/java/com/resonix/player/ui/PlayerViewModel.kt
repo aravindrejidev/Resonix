@@ -1,17 +1,24 @@
 package com.resonix.player.ui
 
+import android.Manifest
 import android.app.Application
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.MoreExecutors
 import com.resonix.player.data.AppDatabase
@@ -20,12 +27,26 @@ import com.resonix.player.data.MediaStoreScanner
 import com.resonix.player.data.ScannedFolder
 import com.resonix.player.data.Track
 import com.resonix.player.playback.PlaybackService
+import com.resonix.player.util.AppMessages
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+private const val TAG = "PlayerViewModel"
+
+/**
+ * Bump this whenever the library scanner learns to read something it used to miss. On the next
+ * launch every saved folder is re-scanned once, so songs scanned by an older version (0:00
+ * durations, "Unknown artist", no quality badges) are repaired without the user doing anything.
+ */
+private const val SCANNER_VERSION = 2
 
 data class NowPlayingUiState(
     val hasTrack: Boolean = false,
@@ -58,6 +79,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private var mediaController: MediaController? = null
 
+    /** A "play this folder" request that arrived before the service connection was up. */
+    private var pendingPlayRequest: Bundle? = null
+
     /** UI preferences (theme, accent, sort order, Tools values …). */
     val settings = AppSettings(application)
 
@@ -81,45 +105,31 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _scanningFolderUri = MutableStateFlow<String?>(null)
     val scanningFolderUri: StateFlow<String?> = _scanningFolderUri.asStateFlow()
 
+    /** Scans never overlap — they would fight over the same Room rows. */
+    private val scanMutex = Mutex()
+
     private val playerListener = object : Player.Listener {
-        override fun onIsPlayingChanged(isPlaying: Boolean) {
-            _uiState.value = _uiState.value.copy(isPlaying = isPlaying)
+        override fun onMediaMetadataChanged(mediaMetadata: androidx.media3.common.MediaMetadata) {
+            mediaController?.let { refreshTrack(it) }
         }
 
-        override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-            val extras = mediaMetadata.extras
-            _uiState.value = _uiState.value.copy(
-                hasTrack = true,
-                contentUri = mediaController?.currentMediaItem?.mediaId ?: "",
-                title = mediaMetadata.title?.toString() ?: "",
-                artist = mediaMetadata.artist?.toString() ?: "",
-                albumArtUri = extras?.getString("albumArtUri") ?: "",
-                sampleRateHz = extras?.getInt("sampleRateHz") ?: 0,
-                bitDepth = extras?.getInt("bitDepth") ?: 0,
-                format = extras?.getString("format") ?: ""
-            )
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            mediaController?.let { refreshTrack(it) }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            mediaController?.let { refreshPlaying(it) }
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            mediaController?.let { refreshPlaying(it) }
         }
     }
 
     init {
-        val context = getApplication<Application>()
-        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
-        controllerFuture.addListener(
-            {
-                val controller = controllerFuture.get()
-                mediaController = controller
-                controller.addListener(playerListener)
-                // The listener only reports *changes* — pick up what is already playing
-                // when the app is reopened while the service kept going in the background.
-                if (controller.currentMediaItem != null) {
-                    playerListener.onMediaMetadataChanged(controller.mediaMetadata)
-                    playerListener.onIsPlayingChanged(controller.isPlaying)
-                }
-            },
-            MoreExecutors.directExecutor()
-        )
+        connectToPlaybackService()
 
+        val context = getApplication<Application>()
         viewModelScope.launch {
             AppDatabase.getInstance(context).trackDao().getAllTracks().collect {
                 _libraryTracks.value = it
@@ -138,17 +148,71 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 mediaController?.let { controller ->
                     _uiState.value = _uiState.value.copy(
                         positionMs = controller.currentPosition.coerceAtLeast(0),
-                        durationMs = controller.duration.coerceAtLeast(0)
+                        durationMs = controller.duration.coerceAtLeast(0),
+                        isPlaying = isControllerPlaying(controller),
                     )
                 }
                 delay(250)
             }
         }
+
+        rescanLibraryOnceAfterScannerUpgrade()
+    }
+
+    private fun connectToPlaybackService() {
+        val context = getApplication<Application>()
+        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
+        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        controllerFuture.addListener(
+            {
+                try {
+                    val controller = controllerFuture.get()
+                    mediaController = controller
+                    controller.addListener(playerListener)
+                    // The listener only reports *changes* — pick up what is already playing
+                    // when the app is reopened while the service kept going in the background.
+                    refreshTrack(controller)
+                    refreshPlaying(controller)
+                    pendingPlayRequest?.let { request ->
+                        pendingPlayRequest = null
+                        sendPlayRequest(controller, request)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Could not connect to the playback service", e)
+                    AppMessages.post("Couldn't connect to the audio service")
+                }
+            },
+            MoreExecutors.directExecutor()
+        )
+    }
+
+    /** The UI shows "playing" from the moment play is requested, including while a file is still loading. */
+    private fun isControllerPlaying(controller: MediaController): Boolean =
+        controller.playWhenReady && controller.playbackState != Player.STATE_IDLE
+
+    private fun refreshPlaying(controller: MediaController) {
+        _uiState.value = _uiState.value.copy(isPlaying = isControllerPlaying(controller))
+    }
+
+    private fun refreshTrack(controller: MediaController) {
+        val item = controller.currentMediaItem ?: return
+        val metadata = item.mediaMetadata
+        val extras = metadata.extras
+        _uiState.value = _uiState.value.copy(
+            hasTrack = true,
+            contentUri = item.mediaId,
+            title = metadata.title?.toString() ?: "",
+            artist = metadata.artist?.toString() ?: "",
+            albumArtUri = extras?.getString("albumArtUri") ?: "",
+            sampleRateHz = extras?.getInt("sampleRateHz") ?: 0,
+            bitDepth = extras?.getInt("bitDepth") ?: 0,
+            format = extras?.getString("format") ?: ""
+        )
     }
 
     fun playPause() {
         val controller = mediaController ?: return
-        if (controller.isPlaying) controller.pause() else controller.play()
+        if (isControllerPlaying(controller)) controller.pause() else controller.play()
     }
 
     fun skipNext() = mediaController?.seekToNext()
@@ -173,8 +237,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playFolder(track.rootFolderUri, track.folderPath, shuffle, startContentUri = track.contentUri)
     }
 
-    /** Used by the Repo screen to play every track under a scanned root
-     * (folderPath "" there means "the root itself", not "MediaStore" —
+    /** Plays every track directly inside [folderPath] of a scanned root
+     * (folderPath "" means "the root itself", not "MediaStore" —
      * rootFolderUri is what keeps those apart, see TrackDao). */
     fun playFolder(
         rootFolderUri: String,
@@ -182,25 +246,48 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         shuffle: Boolean = false,
         startContentUri: String? = null,
     ) {
-        val controller = mediaController ?: return
-        val args = Bundle().apply {
+        val request = Bundle().apply {
             putString(PlaybackService.ARG_ROOT_FOLDER_URI, rootFolderUri)
             putString(PlaybackService.ARG_FOLDER_PATH, folderPath)
             putBoolean(PlaybackService.ARG_SHUFFLE, shuffle)
             if (startContentUri != null) putString(PlaybackService.ARG_START_URI, startContentUri)
+            // Same order as the list the user is looking at.
+            val sort = settings.state.value
+            putString(PlaybackService.ARG_SORT_KEY, sort.sortKey.name)
+            putBoolean(PlaybackService.ARG_SORT_ASCENDING, sort.sortAscending)
         }
-        controller.sendCustomCommand(
+        val controller = mediaController
+        if (controller == null) {
+            pendingPlayRequest = request  // sent as soon as the service connection is up
+            return
+        }
+        sendPlayRequest(controller, request)
+    }
+
+    private fun sendPlayRequest(controller: MediaController, request: Bundle) {
+        val result = controller.sendCustomCommand(
             SessionCommand(PlaybackService.COMMAND_PLAY_FOLDER, Bundle.EMPTY),
-            args
+            request
+        )
+        result.addListener(
+            {
+                try {
+                    val code = result.get().resultCode
+                    if (code != SessionResult.RESULT_SUCCESS) {
+                        Log.w(TAG, "Play command rejected: $code")
+                        AppMessages.post("Couldn't start playback (error $code)")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Play command failed", e)
+                    AppMessages.post("Couldn't start playback")
+                }
+            },
+            MoreExecutors.directExecutor()
         )
     }
 
     fun scanLibrary() {
-        viewModelScope.launch {
-            _isScanning.value = true
-            MediaStoreScanner(getApplication()).scan()
-            _isScanning.value = false
-        }
+        viewModelScope.launch { scanDeviceLibrary(announce = true) }
     }
 
     /** Call with the Uri from an OpenDocumentTree picker result. Persists
@@ -208,18 +295,81 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
      * again, then runs the first scan. */
     fun addFolder(treeUri: Uri) {
         val context = getApplication<Application>()
-        context.contentResolver.takePersistableUriPermission(
-            treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-        )
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: SecurityException) {
+            // Scanning still works for this session; it just may not survive a restart.
+            Log.w(TAG, "Couldn't persist access to $treeUri", e)
+        }
         rescanFolder(treeUri.toString())
     }
 
     fun rescanFolder(rootUri: String) {
-        viewModelScope.launch {
+        viewModelScope.launch { scanFolderNow(rootUri) }
+    }
+
+    private suspend fun scanFolderNow(rootUri: String) {
+        scanMutex.withLock {
             _scanningFolderUri.value = rootUri
-            FolderScanner(getApplication()).scanFolder(Uri.parse(rootUri))
-            _scanningFolderUri.value = null
+            try {
+                FolderScanner(getApplication()).scanFolder(Uri.parse(rootUri))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Scanning $rootUri failed", e)
+                AppMessages.post("Couldn't scan that folder")
+            } finally {
+                _scanningFolderUri.value = null
+            }
         }
+    }
+
+    private suspend fun scanDeviceLibrary(announce: Boolean) {
+        scanMutex.withLock {
+            _isScanning.value = true
+            try {
+                MediaStoreScanner(getApplication()).scan()
+                if (announce) AppMessages.post("Device library scanned")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Scanning the device library failed", e)
+                AppMessages.post("Couldn't scan the device library")
+            } finally {
+                _isScanning.value = false
+            }
+        }
+    }
+
+    /** See [SCANNER_VERSION]. */
+    private fun rescanLibraryOnceAfterScannerUpgrade() {
+        val context = getApplication<Application>()
+        val prefs = context.getSharedPreferences("resonix_library", Context.MODE_PRIVATE)
+        if (prefs.getInt("scanner_version", 0) >= SCANNER_VERSION) return
+
+        viewModelScope.launch {
+            val database = AppDatabase.getInstance(context)
+            val folders = database.scannedFolderDao().getAllFolders().first()
+            for (folder in folders) {
+                scanFolderNow(folder.rootUri)
+            }
+            val hadDeviceLibrary = database.trackDao().getAllTracks().first().any { it.rootFolderUri.isEmpty() }
+            if (hadDeviceLibrary && canReadDeviceAudio(context)) {
+                scanDeviceLibrary(announce = false)
+            }
+            prefs.edit().putInt("scanner_version", SCANNER_VERSION).apply()
+        }
+    }
+
+    private fun canReadDeviceAudio(context: Context): Boolean {
+        val permission = if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
     }
 
     /** Tracks under one scanned root, newest-folder-structure first —
