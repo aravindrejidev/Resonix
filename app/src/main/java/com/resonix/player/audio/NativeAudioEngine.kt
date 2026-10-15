@@ -44,6 +44,9 @@ class NativeAudioEngine {
     fun playTrack(filePath: String): Boolean {
         return if (nativeHandle != 0L) nativePlayTrack(nativeHandle, filePath) else false
     }
+    fun playTrackFd(fd: Int): Boolean {
+        return if (nativeHandle != 0L) nativePlayTrackFd(nativeHandle, fd) else false
+    }
 
     fun pauseTrack() {
         if (nativeHandle != 0L) nativePauseTrack(nativeHandle)
@@ -133,6 +136,7 @@ class NativeAudioEngine {
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
     private external fun nativePlayTrack(handle: Long, filePath: String): Boolean
+        private external fun nativePlayTrackFd(handle: Long, fd: Int): Boolean
     private external fun nativePauseTrack(handle: Long)
     private external fun nativeResumeTrack(handle: Long)
     private external fun nativeSeekTo(handle: Long, positionMs: Long)
