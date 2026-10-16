@@ -487,7 +487,11 @@ fun NeoDivider(modifier: Modifier = Modifier) {
     )
 }
 
-/** Screen backdrop: the surface colour plus a faint pool of light in the top-left corner. */
+/**
+ * Screen backdrop: the one flat surface colour. (Neumorphism only works when every
+ * surface *and* the background are the same colour — a gradient here shows up as a
+ * visible seam under the fade overlays at the top and bottom of the lists.)
+ */
 @Composable
 fun Modifier.neoBackground(): Modifier {
     val neo = LocalNeoColors.current
