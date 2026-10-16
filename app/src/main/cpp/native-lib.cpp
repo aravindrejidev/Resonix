@@ -35,7 +35,6 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativePlayTrack(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT void JNICALL
 JNIEXPORT jboolean JNICALL
 Java_com_resonix_player_audio_NativeAudioEngine_nativePlayTrackFd(
         JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint fd) {
@@ -45,6 +44,8 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativePlayTrackFd(
     }
     return engine->playTrackFd(static_cast<int>(fd)) ? JNI_TRUE : JNI_FALSE;
 }
+
+JNIEXPORT void JNICALL
 Java_com_resonix_player_audio_NativeAudioEngine_nativePauseTrack(
         JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
     auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
