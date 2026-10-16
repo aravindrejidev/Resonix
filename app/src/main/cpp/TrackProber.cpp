@@ -44,7 +44,6 @@ Java_com_resonix_player_audio_TrackProber_nativeProbe(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jint JNICALL
 JNIEXPORT jboolean JNICALL
 Java_com_resonix_player_audio_TrackProber_nativeProbeFd(
         JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint fd) {
@@ -57,6 +56,8 @@ Java_com_resonix_player_audio_TrackProber_nativeProbeFd(
     h->decoder.close();  // metadata only — never kept open for playback
     return ok ? JNI_TRUE : JNI_FALSE;
 }
+
+JNIEXPORT jint JNICALL
 Java_com_resonix_player_audio_TrackProber_nativeGetSampleRate(
         JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
     return reinterpret_cast<ProbeHandle *>(handle)->lastInfo.sampleRateHz;
