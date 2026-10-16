@@ -44,6 +44,13 @@ class NativeAudioEngine {
     fun playTrack(filePath: String): Boolean {
         return if (nativeHandle != 0L) nativePlayTrack(nativeHandle, filePath) else false
     }
+
+    /**
+     * Same as [playTrack], but reads from an already-open file descriptor —
+     * the way to play a content:// document (SAF folder or MediaStore), which
+     * can't be re-opened by path. The engine dup()s the descriptor, so the
+     * caller may close its own copy as soon as this returns.
+     */
     fun playTrackFd(fd: Int): Boolean {
         return if (nativeHandle != 0L) nativePlayTrackFd(nativeHandle, fd) else false
     }
@@ -136,7 +143,7 @@ class NativeAudioEngine {
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
     private external fun nativePlayTrack(handle: Long, filePath: String): Boolean
-        private external fun nativePlayTrackFd(handle: Long, fd: Int): Boolean
+    private external fun nativePlayTrackFd(handle: Long, fd: Int): Boolean
     private external fun nativePauseTrack(handle: Long)
     private external fun nativeResumeTrack(handle: Long)
     private external fun nativeSeekTo(handle: Long, positionMs: Long)
