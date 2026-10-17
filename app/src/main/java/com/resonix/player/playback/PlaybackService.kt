@@ -154,13 +154,17 @@ class PlaybackService : MediaSessionService() {
             queueManager.nowPlaying.collect { playing ->
                 if (playing != null) audioFocusManager.requestFocus()
                 player.setNowPlaying(playing)
+                publishSnapshot()
             }
         }
 
         // A track starting to load / finishing loading changes the session's
         // state (buffering vs playing) even though nothing else did.
         serviceScope.launch {
-            queueManager.isLoading.collect { player.refreshFromEngine() }
+            queueManager.isLoading.collect {
+                player.refreshFromEngine()
+                publishSnapshot()
+            }
         }
 
         // Polling loop: checks for a finished track often (so the next one
@@ -171,6 +175,7 @@ class PlaybackService : MediaSessionService() {
             while (true) {
                 queueManager.checkForAutoAdvance()
                 if (ticks % 5 == 0) player.refreshFromEngine()
+                if (ticks % 2 == 0) publishSnapshot()
                 ticks++
                 delay(100)
             }
@@ -181,7 +186,24 @@ class PlaybackService : MediaSessionService() {
         return mediaSession
     }
 
+    /** What the screens show: see PlaybackStateBus. */
+    private fun publishSnapshot() {
+        val playing = queueManager.nowPlaying.value
+        val durationMs = playing?.let { p -> p.info.durationMs.takeIf { it > 0L } ?: p.track.durationMs } ?: 0L
+        var positionMs = engine.getCurrentPositionMs().coerceAtLeast(0L)
+        if (durationMs > 0L) positionMs = minOf(positionMs, durationMs)
+        PlaybackStateBus.publish(
+            PlaybackSnapshot(
+                playing = playing,
+                isPlaying = engine.isPlaying() || queueManager.isLoading.value,
+                positionMs = positionMs,
+                durationMs = durationMs,
+            )
+        )
+    }
+
     override fun onDestroy() {
+        PlaybackStateBus.publish(PlaybackSnapshot())
         unregisterReceiver(becomingNoisyReceiver)
         serviceScope.cancel()
         audioFocusManager.abandonFocus()
