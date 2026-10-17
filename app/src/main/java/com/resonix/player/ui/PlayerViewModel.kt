@@ -14,8 +14,6 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.MediaItem
-import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
@@ -26,7 +24,10 @@ import com.resonix.player.data.FolderScanner
 import com.resonix.player.data.MediaStoreScanner
 import com.resonix.player.data.ScannedFolder
 import com.resonix.player.data.Track
+import com.resonix.player.audio.displayFormatName
 import com.resonix.player.playback.PlaybackService
+import com.resonix.player.playback.PlaybackSnapshot
+import com.resonix.player.playback.PlaybackStateBus
 import com.resonix.player.util.AppMessages
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -67,13 +68,12 @@ data class NowPlayingUiState(
 data class SleepTimerState(val totalMinutes: Int, val endsAtElapsedMs: Long)
 
 /**
- * Connects the UI to PlaybackService purely through a Media3
- * MediaController — never touches NativeAudioEngine/PlaybackQueueManager
- * directly, so playback keeps working the same way whether the app is
- * foregrounded or not. Custom hi-res fields (sample rate, bit depth,
- * format) ride through MediaMetadata's extras Bundle — see
- * ResonixPlayer's Track.toMediaItemData() — since the standard Player
- * interface has no such fields of its own.
+ * Talks to PlaybackService in two directions, and never touches
+ * NativeAudioEngine / PlaybackQueueManager directly:
+ *  - commands (play, pause, next, seek, "play this folder") go out through a Media3
+ *    MediaController, so playback behaves the same whether the app is foregrounded or not;
+ *  - what is playing comes back through PlaybackStateBus — the service and the UI share a
+ *    process, and this avoids depending on the MediaController relaying the playlist in time.
  */
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -108,24 +108,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** Scans never overlap — they would fight over the same Room rows. */
     private val scanMutex = Mutex()
 
-    private val playerListener = object : Player.Listener {
-        override fun onMediaMetadataChanged(mediaMetadata: androidx.media3.common.MediaMetadata) {
-            mediaController?.let { refreshTrack(it) }
-        }
-
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            mediaController?.let { refreshTrack(it) }
-        }
-
-        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-            mediaController?.let { refreshPlaying(it) }
-        }
-
-        override fun onPlaybackStateChanged(playbackState: Int) {
-            mediaController?.let { refreshPlaying(it) }
-        }
-    }
-
     init {
         connectToPlaybackService()
 
@@ -141,22 +123,37 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        // Media3 doesn't push continuous position updates on its own —
-        // polling matches how the rest of this app already tracks position.
+        // What is playing, whether it is playing, and where it is — straight from the service
+        // (see PlaybackStateBus for why this does not go through the MediaController).
         viewModelScope.launch {
-            while (true) {
-                mediaController?.let { controller ->
-                    _uiState.value = _uiState.value.copy(
-                        positionMs = controller.currentPosition.coerceAtLeast(0),
-                        durationMs = controller.duration.coerceAtLeast(0),
-                        isPlaying = isControllerPlaying(controller),
-                    )
-                }
-                delay(250)
-            }
+            PlaybackStateBus.snapshot.collect { applySnapshot(it) }
         }
 
         rescanLibraryOnceAfterScannerUpgrade()
+    }
+
+    private fun applySnapshot(snapshot: PlaybackSnapshot) {
+        val playing = snapshot.playing
+        if (playing == null) {
+            _uiState.value = NowPlayingUiState(isPlaying = snapshot.isPlaying)
+            return
+        }
+        val track = playing.track
+        val info = playing.info
+        val decoderKnows = info.sampleRateHz > 0
+        _uiState.value = NowPlayingUiState(
+            hasTrack = true,
+            contentUri = track.contentUri,
+            title = track.title,
+            artist = track.artist,
+            albumArtUri = track.albumArtUri,
+            isPlaying = snapshot.isPlaying,
+            positionMs = snapshot.positionMs,
+            durationMs = snapshot.durationMs,
+            sampleRateHz = if (decoderKnows) info.sampleRateHz else track.sampleRateHz,
+            bitDepth = if (decoderKnows) info.bitDepth else track.bitDepth,
+            format = displayFormatName(info.format.ifBlank { track.format }),
+        )
     }
 
     private fun connectToPlaybackService() {
@@ -168,11 +165,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 try {
                     val controller = controllerFuture.get()
                     mediaController = controller
-                    controller.addListener(playerListener)
-                    // The listener only reports *changes* — pick up what is already playing
-                    // when the app is reopened while the service kept going in the background.
-                    refreshTrack(controller)
-                    refreshPlaying(controller)
                     pendingPlayRequest?.let { request ->
                         pendingPlayRequest = null
                         sendPlayRequest(controller, request)
@@ -186,33 +178,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    /** The UI shows "playing" from the moment play is requested, including while a file is still loading. */
-    private fun isControllerPlaying(controller: MediaController): Boolean =
-        controller.playWhenReady && controller.playbackState != Player.STATE_IDLE
-
-    private fun refreshPlaying(controller: MediaController) {
-        _uiState.value = _uiState.value.copy(isPlaying = isControllerPlaying(controller))
-    }
-
-    private fun refreshTrack(controller: MediaController) {
-        val item = controller.currentMediaItem ?: return
-        val metadata = item.mediaMetadata
-        val extras = metadata.extras
-        _uiState.value = _uiState.value.copy(
-            hasTrack = true,
-            contentUri = item.mediaId,
-            title = metadata.title?.toString() ?: "",
-            artist = metadata.artist?.toString() ?: "",
-            albumArtUri = extras?.getString("albumArtUri") ?: "",
-            sampleRateHz = extras?.getInt("sampleRateHz") ?: 0,
-            bitDepth = extras?.getInt("bitDepth") ?: 0,
-            format = extras?.getString("format") ?: ""
-        )
-    }
-
     fun playPause() {
         val controller = mediaController ?: return
-        if (isControllerPlaying(controller)) controller.pause() else controller.play()
+        if (_uiState.value.isPlaying) controller.pause() else controller.play()
     }
 
     fun skipNext() = mediaController?.seekToNext()
@@ -397,7 +365,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
-        mediaController?.removeListener(playerListener)
         mediaController?.release()
         super.onCleared()
     }
