@@ -77,24 +77,26 @@ class ResonixPlayer(
         val playing = nowPlaying
         val loading = queueManager.isLoading.value
 
-        val commands = Player.Commands.Builder()
-        if (playing != null) {
-            commands.addAll(
-                Player.COMMAND_PLAY_PAUSE,
-                Player.COMMAND_STOP,
-                Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
-                Player.COMMAND_SEEK_TO_PREVIOUS,  // "previous" restarts the track when there is nothing before it
-                Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
-                Player.COMMAND_GET_TIMELINE,
-                Player.COMMAND_GET_METADATA
-            )
-            if (playing.next != null) {
-                commands.addAll(Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-            }
-            if (playing.previous != null) {
-                commands.add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-            }
-        }
+        // Every command is available all the time, even before the first song loads and even with
+        // nothing before / after the current one. A MediaController only receives the playlist /
+        // current item / metadata while it is allowed to ask for them, and command availability
+        // is relayed to it asynchronously — gating these on queue state meant the UI's controller
+        // could connect without them (mini player hidden, "Nothing playing" while music played)
+        // or have a Next press dropped. Pressing Next on the last song is simply a no-op:
+        // Media3 checks the real playlist before it ever reaches handleSeek().
+        val commands = Player.Commands.Builder().addAll(
+            Player.COMMAND_PLAY_PAUSE,
+            Player.COMMAND_PREPARE,
+            Player.COMMAND_STOP,
+            Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_PREVIOUS,  // "previous" restarts the track when there is nothing before it
+            Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_NEXT,
+            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+            Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
+            Player.COMMAND_GET_TIMELINE,
+            Player.COMMAND_GET_METADATA
+        )
 
         val playbackState = when {
             items.isEmpty() -> Player.STATE_IDLE  // Media3 only allows IDLE / ENDED with an empty playlist
