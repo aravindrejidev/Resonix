@@ -1,5 +1,8 @@
 package com.resonix.player.ui.screens
 
+import android.content.Intent
+import android.provider.Settings
+import androidx.activity.ComponentActivity
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ScrollState
@@ -27,8 +30,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -39,6 +45,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.resonix.player.data.ScannedFolder
 import com.resonix.player.ui.OutputEngine
 import com.resonix.player.ui.ReplayGainMode
@@ -51,6 +60,7 @@ import com.resonix.player.ui.neo.NeoIcons
 import com.resonix.player.ui.neo.NeoLoader
 import com.resonix.player.ui.neo.NeoSectionLabel
 import com.resonix.player.ui.neo.NeoSegmented
+import com.resonix.player.ui.neo.NeoSlider
 import com.resonix.player.ui.neo.NeoSwitch
 import com.resonix.player.ui.neo.formatRelativeTime
 import com.resonix.player.ui.neo.neoSurface
@@ -80,6 +90,20 @@ fun SettingsScreen(
     val versionName = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
             .getOrNull() ?: "dev"
+    }
+
+    // Whether the playback notification (and with it the lock-screen / quick-settings media
+    // player) is allowed to show. Re-checked whenever the user comes back from system settings.
+    var notificationsOn by remember { mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled()) }
+    val activity = context as? ComponentActivity
+    DisposableEffect(activity) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationsOn = NotificationManagerCompat.from(context).areNotificationsEnabled()
+            }
+        }
+        activity?.lifecycle?.addObserver(observer)
+        onDispose { activity?.lifecycle?.removeObserver(observer) }
     }
 
     Column(
@@ -187,11 +211,33 @@ fun SettingsScreen(
             )
         }
 
+        SettingsGroup("Playback") {
+            ActionRow(
+                icon = NeoIcons.Headphones,
+                title = "Notification controls",
+                subtitle = if (notificationsOn) {
+                    "On — play, pause and skip from the notification and lock screen"
+                } else {
+                    "Off — tap to allow notifications so the phone's media player can show"
+                },
+                onClick = {
+                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        // No settings page to open on this device — nothing more we can do.
+                    }
+                },
+            )
+        }
+
         SettingsGroup("Audio engine") {
             ChoiceRow(
                 icon = NeoIcons.Headphones,
                 title = "Output",
-                subtitle = "Which audio backend to prefer",
+                subtitle = "Auto picks the best backend; if one can't open, the other is used",
                 options = OutputEngine.entries.map { it.label },
                 selectedIndex = settings.outputEngine.ordinal,
                 onSelect = { index -> onChange { it.copy(outputEngine = OutputEngine.entries[index]) } },
@@ -200,7 +246,7 @@ fun SettingsScreen(
             ToggleRow(
                 icon = NeoIcons.Lock,
                 title = "Exclusive mode",
-                subtitle = "Ask for sole access to the output stream",
+                subtitle = "Ask for sole access to the output stream (AAudio)",
                 checked = settings.exclusiveMode,
                 onCheckedChange = { on -> onChange { it.copy(exclusiveMode = on) } },
             )
@@ -208,7 +254,7 @@ fun SettingsScreen(
             ToggleRow(
                 icon = NeoIcons.Bolt,
                 title = "Bit-perfect output",
-                subtitle = "Match the file's sample rate — no resampling",
+                subtitle = "On: each song plays at its own sample rate. Off: everything at 48 kHz (from the next song)",
                 checked = settings.bitPerfect,
                 onCheckedChange = { on -> onChange { it.copy(bitPerfect = on) } },
             )
@@ -220,6 +266,15 @@ fun SettingsScreen(
                 checked = settings.directVolume,
                 onCheckedChange = { on -> onChange { it.copy(directVolume = on) } },
             )
+            if (settings.directVolume) {
+                SettingsDivider()
+                SliderRow(
+                    title = "Volume level",
+                    valueText = "${(settings.directVolumeLevel * 100f).toInt()}%",
+                    value = settings.directVolumeLevel,
+                    onValueChange = { level -> onChange { it.copy(directVolumeLevel = level) } },
+                )
+            }
             SettingsDivider()
             ChoiceRow(
                 icon = NeoIcons.Equalizer,
@@ -255,7 +310,7 @@ fun SettingsScreen(
             SettingRow(
                 icon = NeoIcons.Info,
                 title = "Built with",
-                subtitle = "Oboe · FFmpeg · Media3 · Jetpack Compose",
+                subtitle = "Oboe · FFmpeg · Jetpack Compose",
             )
         }
 
@@ -409,6 +464,28 @@ private fun ChoiceRow(
         }
         Spacer(Modifier.height(14.dp))
         NeoSegmented(options = options, selectedIndex = selectedIndex, onSelect = onSelect)
+    }
+}
+
+/** A row with a title, its current value and a slider underneath. */
+@Composable
+private fun SliderRow(
+    title: String,
+    valueText: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+) {
+    val neo = LocalNeoColors.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text = title, color = neo.textPrimary, style = NeoType.body, modifier = Modifier.weight(1f))
+            Text(text = valueText, color = neo.textSecondary, style = NeoType.caption)
+        }
+        NeoSlider(value = value, onValueChange = onValueChange)
     }
 }
 

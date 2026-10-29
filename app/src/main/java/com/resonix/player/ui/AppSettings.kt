@@ -15,14 +15,14 @@ enum class SortKey(val label: String) {
     DURATION("Length"),
 }
 
-/** Which audio backend to prefer. Stored only — NativeAudioEngine doesn't read it yet. */
+/** Which audio backend to prefer. The ordinal is what the native engine receives (0 = Auto, 1 = AAudio, 2 = OpenSL ES). */
 enum class OutputEngine(val label: String) {
     AUTO("Auto"),
     AAUDIO("AAudio"),
     OPENSL("OpenSL ES"),
 }
 
-/** Stored only — NativeAudioEngine doesn't read it yet. */
+/** The ordinal is what the native engine receives (0 = Off, 1 = Track, 2 = Album). */
 enum class ReplayGainMode(val label: String) {
     OFF("Off"),
     TRACK("Track"),
@@ -35,8 +35,9 @@ const val EQ_BAND_COUNT = 10
  * Everything the user can change from Settings and Tools. One immutable object so a screen
  * can read what it needs with a single collect, and update it with `copy`.
  *
- * Fields marked "UI only" are saved and shown, but nothing in the audio engine reads them yet —
- * they are the hook points for wiring the engine later.
+ * The audio-engine and sound-shaping fields are applied to the native engine by PlaybackService
+ * (see EngineSettings.kt). Only the equalizer fields are still "UI only": saved and shown, but
+ * nothing in the engine reads them yet.
  */
 data class SettingsState(
     // Appearance
@@ -55,19 +56,23 @@ data class SettingsState(
     // Playback
     val keepScreenOn: Boolean = true,
 
-    // Audio engine — UI only
+    // Audio engine
     val outputEngine: OutputEngine = OutputEngine.AUTO,
     val exclusiveMode: Boolean = true,
     val bitPerfect: Boolean = true,
     val directVolume: Boolean = false,
+    /** 0 … 1 — the level of Direct volume control (only used while that switch is on). */
+    val directVolumeLevel: Float = 1f,
     val replayGain: ReplayGainMode = ReplayGainMode.OFF,
     val peakLimiter: Boolean = true,
 
-    // Tools — UI only
+    // Tools — equalizer (UI only for now)
     val eqEnabled: Boolean = false,
     val eqPreset: String = "Flat",
     /** One gain per band in dB, −12 … +12. */
     val eqBands: List<Float> = List(EQ_BAND_COUNT) { 0f },
+
+    // Tools — sound shaping (applied by the engine)
     /** dB, −12 … +12. */
     val preamp: Float = 0f,
     /** 0 … 1. */
@@ -81,8 +86,11 @@ data class SettingsState(
 /**
  * SharedPreferences-backed store for [SettingsState]. Deliberately dependency-free (no DataStore)
  * so the project needs no new Gradle dependency for the UI.
+ *
+ * One instance per process ([get]): the screens edit it and PlaybackService listens to it, so a
+ * change in Settings reaches the audio engine immediately.
  */
-class AppSettings(context: Context) {
+class AppSettings private constructor(context: Context) {
 
     private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -118,6 +126,7 @@ class AppSettings(context: Context) {
             exclusiveMode = prefs.getBoolean(KEY_EXCLUSIVE, d.exclusiveMode),
             bitPerfect = prefs.getBoolean(KEY_BIT_PERFECT, d.bitPerfect),
             directVolume = prefs.getBoolean(KEY_DVC, d.directVolume),
+            directVolumeLevel = prefs.getFloat(KEY_DVC_LEVEL, d.directVolumeLevel).coerceIn(0f, 1f),
             replayGain = parseEnum(prefs.getString(KEY_REPLAY_GAIN, null), d.replayGain),
             peakLimiter = prefs.getBoolean(KEY_LIMITER, d.peakLimiter),
             eqEnabled = prefs.getBoolean(KEY_EQ_ON, d.eqEnabled),
@@ -145,6 +154,7 @@ class AppSettings(context: Context) {
             .putBoolean(KEY_EXCLUSIVE, s.exclusiveMode)
             .putBoolean(KEY_BIT_PERFECT, s.bitPerfect)
             .putBoolean(KEY_DVC, s.directVolume)
+            .putFloat(KEY_DVC_LEVEL, s.directVolumeLevel)
             .putString(KEY_REPLAY_GAIN, s.replayGain.name)
             .putBoolean(KEY_LIMITER, s.peakLimiter)
             .putBoolean(KEY_EQ_ON, s.eqEnabled)
@@ -157,30 +167,39 @@ class AppSettings(context: Context) {
             .apply()
     }
 
-    private companion object {
-        const val PREFS_NAME = "resonix_ui_settings"
-        const val KEY_THEME = "theme_mode"
-        const val KEY_ACCENT = "accent"
-        const val KEY_HAPTICS = "haptics"
-        const val KEY_BADGES = "show_quality_badges"
-        const val KEY_ART = "show_album_art"
-        const val KEY_SORT = "sort_key"
-        const val KEY_SORT_ASC = "sort_ascending"
-        const val KEY_SOURCE = "last_source_key"
-        const val KEY_KEEP_ON = "keep_screen_on"
-        const val KEY_OUTPUT = "output_engine"
-        const val KEY_EXCLUSIVE = "exclusive_mode"
-        const val KEY_BIT_PERFECT = "bit_perfect"
-        const val KEY_DVC = "direct_volume"
-        const val KEY_REPLAY_GAIN = "replay_gain"
-        const val KEY_LIMITER = "peak_limiter"
-        const val KEY_EQ_ON = "eq_enabled"
-        const val KEY_EQ_PRESET = "eq_preset"
-        const val KEY_EQ_BANDS = "eq_bands"
-        const val KEY_PREAMP = "preamp_db"
-        const val KEY_BASS = "bass_boost"
-        const val KEY_WIDTH = "stereo_width"
-        const val KEY_BALANCE = "balance"
+    companion object {
+        @Volatile
+        private var instance: AppSettings? = null
+
+        fun get(context: Context): AppSettings =
+            instance ?: synchronized(this) {
+                instance ?: AppSettings(context.applicationContext).also { instance = it }
+            }
+
+        private const val PREFS_NAME = "resonix_ui_settings"
+        private const val KEY_THEME = "theme_mode"
+        private const val KEY_ACCENT = "accent"
+        private const val KEY_HAPTICS = "haptics"
+        private const val KEY_BADGES = "show_quality_badges"
+        private const val KEY_ART = "show_album_art"
+        private const val KEY_SORT = "sort_key"
+        private const val KEY_SORT_ASC = "sort_ascending"
+        private const val KEY_SOURCE = "last_source_key"
+        private const val KEY_KEEP_ON = "keep_screen_on"
+        private const val KEY_OUTPUT = "output_engine"
+        private const val KEY_EXCLUSIVE = "exclusive_mode"
+        private const val KEY_BIT_PERFECT = "bit_perfect"
+        private const val KEY_DVC = "direct_volume"
+        private const val KEY_DVC_LEVEL = "direct_volume_level"
+        private const val KEY_REPLAY_GAIN = "replay_gain"
+        private const val KEY_LIMITER = "peak_limiter"
+        private const val KEY_EQ_ON = "eq_enabled"
+        private const val KEY_EQ_PRESET = "eq_preset"
+        private const val KEY_EQ_BANDS = "eq_bands"
+        private const val KEY_PREAMP = "preamp_db"
+        private const val KEY_BASS = "bass_boost"
+        private const val KEY_WIDTH = "stereo_width"
+        private const val KEY_BALANCE = "balance"
     }
 }
 

@@ -141,7 +141,8 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     }
 
     // Android 13+: ask once for permission to show the playback notification (lock-screen /
-    // headset controls). Playback works whether or not it is granted.
+    // headset controls). Playback works whether or not it is granted; if it was refused,
+    // Settings has a row that opens the system page for it.
     val notificationPermissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(Unit) {
@@ -330,6 +331,9 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
             NowPlayingScreen(
                 state = nowPlaying,
                 keepScreenOn = settings.keepScreenOn,
+                showVolume = settings.directVolume,
+                volume = settings.directVolumeLevel,
+                onVolumeChange = { level -> viewModel.settings.update { it.copy(directVolumeLevel = level) } },
                 onPlayPause = { viewModel.playPause() },
                 onNext = { viewModel.skipNext() },
                 onPrevious = { viewModel.skipPrevious() },

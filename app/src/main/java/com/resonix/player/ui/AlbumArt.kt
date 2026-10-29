@@ -9,8 +9,9 @@ import android.os.Build
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -106,16 +107,25 @@ object AlbumArtLoader {
  * Album art for [uriString] (a MediaStore art URI *or* the audio file's own
  * content URI — embedded art is read from the file). `null` while loading
  * or when the file has no art.
+ *
+ * Follows [uriString]: when it changes (the next song starts) the returned state is reset to
+ * that song's art — or to `null` until it has loaded. (This used to be a `produceState`, which
+ * keeps its *previous* value when the key changes, so the mini player went on showing the
+ * first song's cover for every song after it.)
  */
 @Composable
 fun rememberAlbumArt(uriString: String?, sizePx: Int = 512): State<ImageBitmap?> {
     val context = LocalContext.current
-    val cached = remember(uriString, sizePx) {
-        if (uriString.isNullOrEmpty()) null else AlbumArtLoader.peek(uriString, sizePx)?.asImageBitmap()
+    // A fresh state per uri/size: never carries the previous song's cover over.
+    val art = remember(uriString, sizePx) {
+        mutableStateOf<ImageBitmap?>(
+            if (uriString.isNullOrEmpty()) null else AlbumArtLoader.peek(uriString, sizePx)?.asImageBitmap()
+        )
     }
-    return produceState<ImageBitmap?>(initialValue = cached, uriString, sizePx) {
-        if (value == null && !uriString.isNullOrEmpty()) {
-            value = AlbumArtLoader.load(context, Uri.parse(uriString), sizePx)?.asImageBitmap()
+    LaunchedEffect(uriString, sizePx) {
+        if (art.value == null && !uriString.isNullOrEmpty()) {
+            art.value = AlbumArtLoader.load(context, Uri.parse(uriString), sizePx)?.asImageBitmap()
         }
     }
+    return art
 }

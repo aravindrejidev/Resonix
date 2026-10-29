@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -54,6 +56,11 @@ import kotlinx.coroutines.delay
 fun NowPlayingScreen(
     state: NowPlayingUiState,
     keepScreenOn: Boolean,
+    /** Direct volume control is on: show the in-engine volume slider. */
+    showVolume: Boolean,
+    /** 0 … 1, the in-engine volume (only meaningful while [showVolume]). */
+    volume: Float,
+    onVolumeChange: (Float) -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
     onPrevious: () -> Unit,
@@ -218,6 +225,39 @@ fun NowPlayingScreen(
         ) {
             Text(text = formatDuration(shownPositionMs), color = neo.textSecondary, style = NeoType.caption)
             Text(text = formatDuration(state.durationMs), color = neo.textSecondary, style = NeoType.caption)
+        }
+
+        if (showVolume) {
+            // Direct volume control (Settings → Audio engine): the level inside the engine.
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = NeoIcons.Volume,
+                    contentDescription = "Volume",
+                    tint = neo.textSecondary,
+                    modifier = Modifier.size(22.dp),
+                )
+                NeoSlider(
+                    value = volume,
+                    onValueChange = onVolumeChange,
+                    modifier = Modifier.weight(1f),
+                    trackHeight = 8.dp,
+                    thumbDiameter = 22.dp,
+                )
+                Text(
+                    text = "${(volume * 100f).toInt()}%",
+                    color = neo.textSecondary,
+                    style = NeoType.caption,
+                    modifier = Modifier.widthIn(min = 36.dp),
+                    textAlign = TextAlign.End,
+                )
+            }
         }
 
         Spacer(Modifier.height(18.dp))

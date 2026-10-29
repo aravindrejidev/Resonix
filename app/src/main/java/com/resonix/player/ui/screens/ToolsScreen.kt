@@ -46,7 +46,7 @@ import androidx.compose.ui.unit.dp
 import com.resonix.player.ui.EQ_BAND_COUNT
 import com.resonix.player.ui.NowPlayingUiState
 import com.resonix.player.ui.SettingsState
-import com.resonix.player.ui.SleepTimerState
+import com.resonix.player.playback.SleepTimerState
 import com.resonix.player.ui.neo.NeoCard
 import com.resonix.player.ui.neo.NeoChip
 import com.resonix.player.ui.neo.NeoHiResTag
@@ -112,9 +112,10 @@ internal fun ScreenHeader(title: String, subtitle: String, modifier: Modifier = 
 /**
  * Tools: the equaliser and the other sound / playback controls.
  *
- * The equaliser, preamp, bass, width and balance are an interface only for now — they are saved
- * in [SettingsState] and shown, but the audio engine does not read them yet. The sleep timer and
- * the signal card are real.
+ * Preamp, bass boost, stereo width and balance, the sleep timer and the signal card are live —
+ * PlaybackService feeds the first four into the audio engine as they change. Only the equaliser
+ * is an interface for now: its bands are saved in [SettingsState] and shown, but the engine does
+ * not read them yet.
  */
 @Composable
 fun ToolsScreen(
@@ -368,8 +369,6 @@ private fun SoundCard(settings: SettingsState, onChange: ((SettingsState) -> Set
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(text = "Sound shaping", color = neo.textPrimary, style = NeoType.heading)
-                    Spacer(Modifier.width(8.dp))
-                    PreviewTag()
                 }
                 Text(text = "Drag a knob up or down to turn it", color = neo.textSecondary, style = NeoType.caption)
             }
@@ -504,6 +503,24 @@ private fun SignalCard(state: NowPlayingUiState) {
                 SignalCell("FORMAT", if (state.hasTrack && state.format.isNotBlank()) state.format.uppercase() else "—", Modifier.weight(1f))
                 SignalCell("BIT DEPTH", if (state.hasTrack && state.bitDepth > 0) "${state.bitDepth}-bit" else "—", Modifier.weight(1f))
                 SignalCell("SAMPLE RATE", rate, Modifier.weight(1f))
+            }
+        }
+        if (state.hasTrack && state.outputInfo.isNotBlank()) {
+            // What the output stream really is — shows whether Exclusive / the chosen API were granted.
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(text = "OUTPUT", color = neo.textTertiary, style = NeoType.tiny)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = state.outputInfo,
+                    color = neo.textPrimary,
+                    style = NeoType.caption,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }

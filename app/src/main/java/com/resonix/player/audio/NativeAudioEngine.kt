@@ -4,9 +4,9 @@ import kotlin.math.pow
 
 /**
  * Exact decoded properties of the currently loaded track — what FFmpeg
- * actually decoded it as, not file tags. sampleRateHz/channelCount are
- * also what the Oboe stream was reopened to match (see AudioEngine's
- * bit-perfect reopen-per-track behavior).
+ * actually decoded it as, not file tags. sampleRateHz/channelCount describe
+ * the file; with "Bit-perfect output" on they are also what the Oboe stream
+ * was reopened to match.
  */
 data class AudioTrackInfo(
     val sampleRateHz: Int,
@@ -20,7 +20,8 @@ data class AudioTrackInfo(
     val album: String = "",
     val year: Int = 0,
     val trackGainDb: Double = 0.0,
-    val trackPeakLinear: Double = 1.0
+    val trackPeakLinear: Double = 1.0,
+    val albumGainDb: Double = 0.0
 )
 
 /**
@@ -98,15 +99,15 @@ class NativeAudioEngine {
             album = nativeGetAlbum(nativeHandle),
             year = nativeGetYear(nativeHandle),
             trackGainDb = nativeGetTrackGainDb(nativeHandle),
-            trackPeakLinear = nativeGetTrackPeak(nativeHandle)
+            trackPeakLinear = nativeGetTrackPeak(nativeHandle),
+            albumGainDb = nativeGetAlbumGainDb(nativeHandle)
         )
     }
 
-    /** Direct Volume Control: linear gain multiplier in the native
-     * 64-bit DSP stage, applied before the float32 cast Oboe sees —
-     * independent of Android's normal stream-volume ceiling. 1.0 =
-     * unity, clamped natively to [0, 2.0] until the Peak Limiter
-     * (planned next) exists to safely allow pushing higher. */
+    /** Master gain (Direct Volume Control level x audio-focus ducking):
+     * linear multiplier in the native 64-bit DSP stage, applied before the
+     * float32 cast Oboe sees — independent of Android's stream volume.
+     * 1.0 = unity, clamped natively to [0, 4.0]. */
     fun setGain(linearGain: Double) {
         if (nativeHandle != 0L) nativeSetGain(nativeHandle, linearGain)
     }
@@ -118,6 +119,38 @@ class NativeAudioEngine {
 
     fun getGain(): Double {
         return if (nativeHandle != 0L) nativeGetGain(nativeHandle) else 1.0
+    }
+
+    /**
+     * Settings -> Audio engine. [api]: 0 = Auto, 1 = AAudio, 2 = OpenSL ES.
+     * An open output stream is reopened immediately for a changed API / exclusive
+     * flag; [bitPerfect] (stream follows each file's sample rate vs. fixed 48 kHz)
+     * applies from the next track.
+     */
+    fun setOutputConfig(api: Int, exclusive: Boolean, bitPerfect: Boolean) {
+        if (nativeHandle != 0L) nativeSetOutputConfig(nativeHandle, api, exclusive, bitPerfect)
+    }
+
+    /** 0 = Off, 1 = Track, 2 = Album. */
+    fun setReplayGainMode(mode: Int) {
+        if (nativeHandle != 0L) nativeSetReplayGainMode(nativeHandle, mode)
+    }
+
+    fun setLimiterEnabled(enabled: Boolean) {
+        if (nativeHandle != 0L) nativeSetLimiterEnabled(nativeHandle, enabled)
+    }
+
+    /**
+     * Tools -> Sound shaping. [preampDb] in dB, [bassBoost] 0..1, [stereoWidth] 0..2
+     * (1 = untouched image, 0 = mono), [balance] -1 (left) .. +1 (right).
+     */
+    fun setSoundShaping(preampDb: Double, bassBoost: Double, stereoWidth: Double, balance: Double) {
+        if (nativeHandle != 0L) nativeSetSoundShaping(nativeHandle, preampDb, bassBoost, stereoWidth, balance)
+    }
+
+    /** What the output stream really is, e.g. "AAudio · Exclusive · 96 kHz". Empty before the first song. */
+    fun getOutputDescription(): String {
+        return if (nativeHandle != 0L) nativeGetOutputDescription(nativeHandle) else ""
     }
 
     /** Output Plugin System fallback: pulls up to maxFrames of fully
@@ -164,6 +197,18 @@ class NativeAudioEngine {
     private external fun nativeGetTrackPeak(handle: Long): Double
     private external fun nativeSetGain(handle: Long, linearGain: Double)
     private external fun nativeGetGain(handle: Long): Double
+    private external fun nativeSetOutputConfig(handle: Long, api: Int, exclusive: Boolean, bitPerfect: Boolean)
+    private external fun nativeSetReplayGainMode(handle: Long, mode: Int)
+    private external fun nativeSetLimiterEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeGetOutputDescription(handle: Long): String
+    private external fun nativeSetSoundShaping(
+        handle: Long,
+        preampDb: Double,
+        bassBoost: Double,
+        stereoWidth: Double,
+        balance: Double
+    )
+    private external fun nativeGetAlbumGainDb(handle: Long): Double
     private external fun nativePullSamples(
         handle: Long,
         outBuffer: FloatArray,

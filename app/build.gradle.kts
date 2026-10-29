@@ -94,8 +94,5 @@ dependencies {
 
     implementation(libs.androidx.documentfile)
 
-    implementation(libs.androidx.media3.session)
-    implementation(libs.androidx.media3.common)
-
     implementation(libs.androidx.lifecycle.viewmodel.compose)
 }

@@ -6,7 +6,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <strings.h>
+
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <thread>
 
@@ -195,12 +199,25 @@ bool AudioDecoder::finishOpen(TrackInfo *outInfo, const char *label) {
     }
 
     mCurrentPositionMs.store(0, std::memory_order_relaxed);
+    mFallbackPositionSec = 0.0;
+    mSeekTargetSec = -1.0;
+    mStartTimeSec = 0.0;
+    {
+        const AVStream *audioStream = mFormatCtx->streams[mStreamIndex];
+        if (audioStream->start_time != AV_NOPTS_VALUE) {
+            double start = static_cast<double>(audioStream->start_time) * av_q2d(audioStream->time_base);
+            if (start > 0.0 && start < 3600.0) {
+                mStartTimeSec = start;
+            }
+        }
+    }
     mEndOfStream = false;
 
     if (outInfo != nullptr) {
         AVStream *stream = mFormatCtx->streams[mStreamIndex];
         AVCodecParameters *params = stream->codecpar;
-        outInfo->sampleRateHz = mOutputSampleRate;
+        outInfo->sampleRateHz = mCodecCtx->sample_rate;
+        outInfo->outputSampleRateHz = mOutputSampleRate;
         outInfo->channelCount = mOutputChannelCount;
         outInfo->bitDepth = params->bits_per_raw_sample > 0
                 ? params->bits_per_raw_sample
@@ -234,8 +251,8 @@ bool AudioDecoder::finishOpen(TrackInfo *outInfo, const char *label) {
         }
 
         auto readTag = [this](const char *key) -> std::string {
-            AVDictionaryEntry *entry = av_dict_get(mFormatCtx->metadata, key, nullptr, 0);
-            return (entry != nullptr && entry->value != nullptr) ? std::string(entry->value) : "";
+            const char *value = findTag(key);
+            return value != nullptr ? std::string(value) : std::string();
         };
         outInfo->title = readTag("title");
         outInfo->artist = readTag("artist");
@@ -248,24 +265,74 @@ bool AudioDecoder::finishOpen(TrackInfo *outInfo, const char *label) {
             outInfo->year = std::atoi(dateTag.c_str());
         }
 
-        std::string gainTag = readTag("REPLAYGAIN_TRACK_GAIN");
-        if (!gainTag.empty()) {
-            // Typically formatted like "-6.50 dB" — atof reads the
-            // leading signed float and stops at the first non-numeric
-            // character, so the " dB" suffix is harmlessly ignored.
-            outInfo->trackGainDb = std::atof(gainTag.c_str());
+        // ReplayGain: values look like "-6.50 dB" / "0.988553". strtod reads
+        // the leading number and stops at the first non-numeric character, so
+        // the " dB" suffix is harmlessly ignored; endptr tells us whether any
+        // number was there at all.
+        auto parseNumber = [](const std::string &text, double *out) -> bool {
+            if (text.empty()) {
+                return false;
+            }
+            char *end = nullptr;
+            double v = std::strtod(text.c_str(), &end);
+            if (end == text.c_str() || !std::isfinite(v)) {
+                return false;
+            }
+            *out = v;
+            return true;
+        };
+
+        double value = 0.0;
+        if (parseNumber(readTag("REPLAYGAIN_TRACK_GAIN"), &value)) {
+            outInfo->trackGainDb = value;
+            outInfo->hasTrackGain = true;
+        } else if (parseNumber(readTag("R128_TRACK_GAIN"), &value)) {
+            // Opus: Q7.8 fixed point, relative to -23 LUFS. ReplayGain's
+            // reference is -18 LUFS, hence the +5 dB.
+            outInfo->trackGainDb = value / 256.0 + 5.0;
+            outInfo->hasTrackGain = true;
         }
-        std::string peakTag = readTag("REPLAYGAIN_TRACK_PEAK");
-        if (!peakTag.empty()) {
-            outInfo->trackPeakLinear = std::atof(peakTag.c_str());
+        if (parseNumber(readTag("REPLAYGAIN_ALBUM_GAIN"), &value)) {
+            outInfo->albumGainDb = value;
+            outInfo->hasAlbumGain = true;
+        } else if (parseNumber(readTag("R128_ALBUM_GAIN"), &value)) {
+            outInfo->albumGainDb = value / 256.0 + 5.0;
+            outInfo->hasAlbumGain = true;
+        }
+        if (parseNumber(readTag("REPLAYGAIN_TRACK_PEAK"), &value) && value > 0.0) {
+            outInfo->trackPeakLinear = value;
+        }
+        if (parseNumber(readTag("REPLAYGAIN_ALBUM_PEAK"), &value) && value > 0.0) {
+            outInfo->albumPeakLinear = value;
         }
     }
 
-    LOGI("Opened %s: %dHz, %d ch, decoder-reported %d-bit", label,
-         mOutputSampleRate, mOutputChannelCount,
+    LOGI("Opened %s: %dHz file -> %dHz out, %d ch, decoder-reported %d-bit", label,
+         mCodecCtx->sample_rate, mOutputSampleRate, mOutputChannelCount,
          outInfo != nullptr ? outInfo->bitDepth : -1);
 
     return true;
+}
+
+// Looks a tag up in the container metadata first, then in the audio stream's own
+// metadata (Ogg Vorbis/Opus keep their comments there). av_dict_get() matches
+// keys case-insensitively unless AV_DICT_MATCH_CASE is passed, which is what we
+// want: "REPLAYGAIN_TRACK_GAIN" and "replaygain_track_gain" both occur in the wild.
+const char *AudioDecoder::findTag(const char *key) const {
+    if (mFormatCtx == nullptr) {
+        return nullptr;
+    }
+    const AVDictionaryEntry *entry = av_dict_get(mFormatCtx->metadata, key, nullptr, 0);
+    if (entry != nullptr && entry->value != nullptr && entry->value[0] != '\0') {
+        return entry->value;
+    }
+    if (mStreamIndex >= 0 && mStreamIndex < static_cast<int>(mFormatCtx->nb_streams)) {
+        entry = av_dict_get(mFormatCtx->streams[mStreamIndex]->metadata, key, nullptr, 0);
+        if (entry != nullptr && entry->value != nullptr && entry->value[0] != '\0') {
+            return entry->value;
+        }
+    }
+    return nullptr;
 }
 
 bool AudioDecoder::openBestAudioStream() {
@@ -297,12 +364,12 @@ bool AudioDecoder::openBestAudioStream() {
 }
 
 bool AudioDecoder::setupResampler() {
-    // Output: interleaved double, source's own sample rate and channel
-    // count carried straight through — no deliberate resampling here.
-    // This is the "bit-perfect" contract: AudioEngine reopens the Oboe
-    // stream to match mOutputSampleRate/mOutputChannelCount, rather than
-    // this decoder converting the source down to some fixed rate.
-    mOutputSampleRate = mCodecCtx->sample_rate;
+    // Output: interleaved double, the source's own channel count, and — unless
+    // AudioEngine asked for a fixed rate (Bit-perfect off) — the source's own
+    // sample rate, i.e. no deliberate resampling. With bit-perfect on, AudioEngine
+    // reopens the Oboe stream to match mOutputSampleRate instead of this decoder
+    // converting the source to some fixed rate.
+    mOutputSampleRate = mTargetSampleRate > 0 ? mTargetSampleRate : mCodecCtx->sample_rate;
     mOutputChannelCount = mCodecCtx->ch_layout.nb_channels;
 
     AVChannelLayout outLayout;
@@ -329,18 +396,23 @@ bool AudioDecoder::setupResampler() {
 }
 
 void AudioDecoder::pushConvertedFrame(RingBuffer &ringBuffer) {
+    const double codecRate = mCodecCtx->sample_rate > 0 ? static_cast<double>(mCodecCtx->sample_rate) : 1.0;
+    const double frameSeconds = static_cast<double>(mFrame->nb_samples) / codecRate;
+
     int64_t pts = mFrame->best_effort_timestamp != AV_NOPTS_VALUE
             ? mFrame->best_effort_timestamp
             : mFrame->pts;
-    if (pts != AV_NOPTS_VALUE) {
-        double seconds = pts * av_q2d(mFormatCtx->streams[mStreamIndex]->time_base);
-        mCurrentPositionMs.store(static_cast<int64_t>(seconds * 1000), std::memory_order_relaxed);
-    } else if (mOutputSampleRate > 0) {
+    const bool havePts = pts != AV_NOPTS_VALUE;
+    double startSeconds;
+    if (havePts) {
+        startSeconds = static_cast<double>(pts) * av_q2d(mFormatCtx->streams[mStreamIndex]->time_base) -
+                       mStartTimeSec;
+    } else {
         // No timestamps in this stream — keep time by counting decoded samples.
-        mCurrentPositionMs.fetch_add(
-                static_cast<int64_t>(mFrame->nb_samples) * 1000 / mOutputSampleRate,
-                std::memory_order_relaxed);
+        startSeconds = mFallbackPositionSec;
     }
+    const double endSeconds = startSeconds + frameSeconds;
+    mFallbackPositionSec = endSeconds;
 
     int outSamples = swr_get_out_samples(mSwrCtx, mFrame->nb_samples);
     if (outSamples <= 0) {
@@ -358,13 +430,45 @@ void AudioDecoder::pushConvertedFrame(RingBuffer &ringBuffer) {
         return;
     }
 
-    size_t sampleCount = static_cast<size_t>(converted) * mOutputChannelCount;
+    // Accurate seeking: drop the audio between the keyframe the container landed on and the
+    // requested position. (The frame is converted first either way, so the resampler's
+    // internal state stays continuous.)
+    size_t skipFrames = 0;
+    if (mSeekTargetSec >= 0.0) {
+        const double target = mSeekTargetSec;
+        if (!havePts || target - startSeconds > 10.0) {
+            mSeekTargetSec = -1.0;  // timestamps can't be trusted here: better a slightly early start
+        } else if (endSeconds <= target) {
+            return;  // entirely before the target
+        } else {
+            if (startSeconds < target) {
+                skipFrames = static_cast<size_t>((target - startSeconds) * mOutputSampleRate + 0.5);
+                skipFrames = std::min(skipFrames, static_cast<size_t>(converted));
+            }
+            mSeekTargetSec = -1.0;
+        }
+    }
+
+    // The position is the *end* of what has been decoded: AudioEngine subtracts the audio still
+    // queued, which leaves exactly the position being heard. (Not updated for audio that was
+    // dropped above, so the position never dips below a seek target.)
+    mCurrentPositionMs.store(static_cast<int64_t>(endSeconds * 1000.0 + 0.5), std::memory_order_relaxed);
+
+    const size_t channels = static_cast<size_t>(mOutputChannelCount);
+    const size_t keepSamples = (static_cast<size_t>(converted) - skipFrames) * channels;
+    if (keepSamples > 0) {
+        writeToRing(ringBuffer, mConvertScratch.data() + skipFrames * channels, keepSamples);
+    }
+}
+
+// Pushes [sampleCount] doubles into the ring buffer.
+void AudioDecoder::writeToRing(RingBuffer &ringBuffer, const double *samples, size_t sampleCount) {
     size_t written = 0;
     // Backpressure: if the ring buffer is momentarily full, retry rather
     // than dropping audio. Only ever called from the decode thread, so a
     // short busy-wait here does not affect real-time audio callback timing.
     while (written < sampleCount) {
-        size_t n = ringBuffer.write(mConvertScratch.data() + written, sampleCount - written);
+        size_t n = ringBuffer.write(samples + written, sampleCount - written);
         written += n;
         if (n == 0) {
             if (mAbort.load(std::memory_order_relaxed)) {
@@ -372,6 +476,27 @@ void AudioDecoder::pushConvertedFrame(RingBuffer &ringBuffer) {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+    }
+}
+
+// At end of file a resampling swr still holds a few samples of filter delay;
+// without this the last milliseconds of every resampled track were cut off.
+void AudioDecoder::drainResampler(RingBuffer &ringBuffer) {
+    if (mSwrCtx == nullptr || mOutputSampleRate == mCodecCtx->sample_rate) {
+        return;
+    }
+    int outSamples = swr_get_out_samples(mSwrCtx, 0);
+    if (outSamples <= 0) {
+        return;
+    }
+    size_t neededCapacity = static_cast<size_t>(outSamples) * mOutputChannelCount;
+    if (mConvertScratch.size() < neededCapacity) {
+        mConvertScratch.resize(neededCapacity);
+    }
+    auto *outPtr = reinterpret_cast<uint8_t *>(mConvertScratch.data());
+    int converted = swr_convert(mSwrCtx, &outPtr, outSamples, nullptr, 0);
+    if (converted > 0) {
+        writeToRing(ringBuffer, mConvertScratch.data(), static_cast<size_t>(converted) * mOutputChannelCount);
     }
 }
 
@@ -388,6 +513,7 @@ bool AudioDecoder::decodeInto(RingBuffer &ringBuffer) {
         while (avcodec_receive_frame(mCodecCtx, mFrame) == 0) {
             pushConvertedFrame(ringBuffer);
         }
+        drainResampler(ringBuffer);
         mEndOfStream = true;
         return false;
     }
@@ -417,7 +543,7 @@ bool AudioDecoder::seekTo(int64_t positionMs) {
     }
 
     AVStream *stream = mFormatCtx->streams[mStreamIndex];
-    int64_t targetTs = static_cast<int64_t>((positionMs / 1000.0) / av_q2d(stream->time_base));
+    int64_t targetTs = static_cast<int64_t>(((positionMs / 1000.0) + mStartTimeSec) / av_q2d(stream->time_base));
 
     if (av_seek_frame(mFormatCtx, mStreamIndex, targetTs, AVSEEK_FLAG_BACKWARD) < 0) {
         LOGW("av_seek_frame failed for position %lld ms", static_cast<long long>(positionMs));
@@ -425,7 +551,16 @@ bool AudioDecoder::seekTo(int64_t positionMs) {
     }
 
     avcodec_flush_buffers(mCodecCtx);
+    if (mSwrCtx != nullptr) {
+        // Drop whatever pre-seek audio the resampler still buffers internally.
+        swr_close(mSwrCtx);
+        if (swr_init(mSwrCtx) < 0) {
+            LOGW("swr_init after seek failed");
+        }
+    }
     mCurrentPositionMs.store(positionMs, std::memory_order_relaxed);
+    mFallbackPositionSec = static_cast<double>(positionMs) / 1000.0;
+    mSeekTargetSec = static_cast<double>(positionMs) / 1000.0;
     mEndOfStream = false;
     return true;
 }

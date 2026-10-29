@@ -19,11 +19,14 @@ namespace resonix {
 struct FdSource;  // custom-IO state for openFd(); defined in AudioDecoder.cpp
 
 // Metadata about the currently open track, as actually decoded — not
-// read from file tags. sampleRateHz/bitDepth/channelCount describe what
-// came out of the decoder, which is what AudioEngine actually asks Oboe
-// to open a stream for.
+// read from file tags. sampleRateHz/bitDepth/channelCount describe the
+// file itself; outputSampleRateHz is the rate of the PCM the decoder hands
+// to the ring buffer (identical to sampleRateHz unless AudioEngine asked
+// the decoder to resample via setTargetSampleRate()), which is what the
+// output stream is opened for.
 struct TrackInfo {
     int sampleRateHz = 0;
+    int outputSampleRateHz = 0;
     int bitDepth = 0;
     int channelCount = 0;
     int64_t bitrateBps = 0;
@@ -36,12 +39,17 @@ struct TrackInfo {
     std::string artist;
     std::string album;
     int year = 0;
-    // REPLAYGAIN_TRACK_GAIN / REPLAYGAIN_TRACK_PEAK tags, 0.0 / 1.0 (no
-    // adjustment, unknown peak) when the file has none. trackPeakLinear
-    // is stored for reference; the DSP chain relies on the Peak Limiter
-    // rather than this value to stay safe regardless of gain source.
+    // REPLAYGAIN_TRACK_* / REPLAYGAIN_ALBUM_* tags (or Opus R128_*_GAIN,
+    // converted to the ReplayGain reference level). hasTrackGain /
+    // hasAlbumGain say whether the file carried a value at all; the gain
+    // fields are 0.0 and the peaks 1.0 when it did not. AudioEngine picks
+    // between them according to the ReplayGain setting.
+    bool hasTrackGain = false;
+    bool hasAlbumGain = false;
     double trackGainDb = 0.0;
     double trackPeakLinear = 1.0;
+    double albumGainDb = 0.0;
+    double albumPeakLinear = 1.0;
 };
 
 // Wraps libavformat + libavcodec + libswresample to decode one audio
@@ -73,6 +81,11 @@ public:
     // may close its own copy as soon as this returns.
     bool openFd(int fd, TrackInfo *outInfo);
 
+    // 0 (default) = hand the PCM over at the file's own sample rate. Any
+    // other value makes libswresample convert to that rate. Takes effect on
+    // the next open()/openFd().
+    void setTargetSampleRate(int hz) { mTargetSampleRate = hz > 0 ? hz : 0; }
+
     // Asks a decodeInto() that is currently waiting for ring-buffer space
     // to give up, so the decode thread can be joined promptly (pause with a
     // full buffer + a new track request used to be able to hang there).
@@ -93,6 +106,9 @@ public:
     // isn't played.
     bool seekTo(int64_t positionMs);
 
+    // End of the audio decoded so far (the stream time just after the last sample pushed
+    // into the ring buffer) — AudioEngine subtracts what is still queued to get the position
+    // of what is actually being heard.
     int64_t getCurrentPositionMs() const {
         return mCurrentPositionMs.load(std::memory_order_relaxed);
     }
@@ -107,6 +123,9 @@ private:
     bool setupResampler();
     void releaseFfmpegState();
     void pushConvertedFrame(RingBuffer &ringBuffer);
+    void writeToRing(RingBuffer &ringBuffer, const double *samples, size_t sampleCount);
+    void drainResampler(RingBuffer &ringBuffer);
+    const char *findTag(const char *key) const;
 
     AVFormatContext *mFormatCtx = nullptr;
     AVCodecContext *mCodecCtx = nullptr;
@@ -117,8 +136,19 @@ private:
     AVFrame *mFrame = nullptr;
 
     int mStreamIndex = -1;
+    int mTargetSampleRate = 0;
     int mOutputSampleRate = 0;
     int mOutputChannelCount = 0;
+
+    // Decode-thread-only state. After a seek the container lands on the keyframe *before* the
+    // requested time; mSeekTargetSec makes pushConvertedFrame() drop the audio up to it so
+    // playback resumes at exactly the position that was asked for.
+    double mSeekTargetSec = -1.0;
+    // Where the audio really begins on the stream's timeline (MP3 encoder delay ≈ 25 ms,
+    // broadcast-style MKV/TS often 1 s or more). Positions and seeks are relative to it.
+    double mStartTimeSec = 0.0;
+    // Running position for streams without timestamps.
+    double mFallbackPositionSec = 0.0;
 
     std::vector<double> mConvertScratch;
     std::atomic<int64_t> mCurrentPositionMs{0};

@@ -12,17 +12,17 @@
 #include <oboe/Oboe.h>
 
 #include "AudioDecoder.h"
-#include "Limiter.h"
+#include "Dsp.h"
 #include "RingBuffer.h"
 
 namespace resonix {
 
 // Owns the full playback pipeline: AudioDecoder (FFmpeg) on a dedicated
 // decode thread -> RingBuffer (lock-free, double-precision) -> Oboe
-// AAudio Exclusive-mode callback, which applies the double-precision
-// DSP chain (DVC gain * ReplayGain -> Peak Limiter; the future EQ plugs
-// in before the limiter) and converts to 32-bit float right before
-// handing samples to Oboe.
+// output stream, whose callback runs the double-precision DSP chain
+// (see Dsp.h: bass shelf, stereo width, balance, DVC x ReplayGain x preamp
+// gain, peak limiter) and converts to 32-bit float right before handing
+// samples to Oboe. The future EQ plugs in ahead of the limiter.
 //
 // Threading contract:
 //   - AudioDecoder's open()/seekTo()/decodeInto() are only ever called
@@ -36,6 +36,14 @@ namespace resonix {
 class AudioEngine : public oboe::AudioStreamDataCallback,
                      public oboe::AudioStreamErrorCallback {
 public:
+    // Values match the Kotlin enums in AppSettings (OutputEngine / ReplayGainMode).
+    enum OutputApi : int { kApiAuto = 0, kApiAAudio = 1, kApiOpenSL = 2 };
+    enum ReplayGainMode : int { kRgOff = 0, kRgTrack = 1, kRgAlbum = 2 };
+
+    // With "bit-perfect" off every track is converted to this one rate, so the
+    // output stream is never reopened between songs.
+    static constexpr int kFixedOutputRate = 48000;
+
     AudioEngine();
     ~AudioEngine() override;
 
@@ -55,19 +63,37 @@ public:
 
     // Position of the audio being *heard* — the decoder runs several seconds
     // ahead of the speaker (ring buffer), so its own position is corrected
-    // by whatever is still queued.
+    // by whatever is still queued. While a seek is pending this is the seek
+    // target, so the UI jumps there immediately.
     int64_t getCurrentPositionMs() const;
     TrackInfo getAudioTrackInfo() const;
     bool isPlaying() const { return mIsPlaying.load(std::memory_order_relaxed); }
 
-    // Direct Volume Control: linear gain multiplier applied in the
-    // double-precision DSP stage in onAudioReady, ahead of the float32
-    // cast Oboe sees — independent of Android's stream-volume ceiling.
-    // 1.0 = unity. The Peak Limiter now catches any resulting overage,
-    // so this ceiling is higher than before the limiter existed.
+    // Master gain (Direct Volume Control level x audio-focus ducking), linear,
+    // applied in the double-precision DSP stage — independent of Android's
+    // stream-volume ceiling. 1.0 = unity.
     void setGain(double linearGain);
     double getGain() const { return mGain.load(std::memory_order_relaxed); }
     static constexpr double kMaxGain = 4.0;  // +12.04 dB
+
+    // --- Settings -> Audio engine ---------------------------------------------
+    // Output API / exclusive mode: an open stream is reopened right away (same
+    // sample rate, so the buffered PCM stays valid). Bit-perfect picks the
+    // stream's sample rate for the *next* track.
+    void setOutputConfig(int api, bool exclusive, bool bitPerfect);
+    void setReplayGainMode(int mode);
+    void setLimiterEnabled(bool enabled);
+
+    // --- Tools -> Sound shaping -------------------------------------------------
+    void setPreampDb(double db) { mDsp.setPreampDb(db); }
+    void setBassBoost(double amount) { mDsp.setBassBoost(amount); }
+    void setStereoWidth(double width) { mDsp.setStereoWidth(width); }
+    void setBalance(double balance) { mDsp.setBalance(balance); }
+
+    // e.g. "AAudio · Exclusive · 96 kHz" — what the output stream really is.
+    // Empty until a stream has been opened. Cheap and never blocks on the
+    // stream lock, so it is safe to poll from the UI thread.
+    std::string getOutputDescription() const;
 
     // True exactly once per track that reached end-of-stream on its own
     // (not a manual pauseTrack()), then resets — call periodically from
@@ -75,13 +101,9 @@ public:
     bool consumeTrackFinishedEvent();
 
     // Output Plugin System fallback path: pulls up to maxFrames of
-    // fully DSP-processed (gain/ReplayGain/limiter) float32 audio into
-    // a caller-provided buffer — the same processing onAudioReady uses,
-    // just driven by an external pull (a Kotlin AudioTrack write loop)
-    // instead of Oboe's callback. Returns frames actually written to
-    // `out` (always == maxFrames once a track is loaded: any underrun
-    // is silence-filled, same as the Oboe path). Not real-time-critical
-    // itself, but internally allocation-free like the Oboe path.
+    // fully DSP-processed float32 audio into a caller-provided buffer —
+    // the same processing onAudioReady uses, just driven by an external
+    // pull (a Kotlin AudioTrack write loop) instead of Oboe's callback.
     int32_t pullProcessedFrames(float *out, int32_t maxFrames, int32_t channelCount);
 
     // oboe::AudioStreamDataCallback
@@ -89,7 +111,7 @@ public:
             oboe::AudioStream *audioStream, void *audioData, int32_t numFrames) override;
 
     // oboe::AudioStreamErrorCallback — called on a new thread, safe to
-    // reopen the stream directly here (see Phase 1 AudioEngine notes).
+    // reopen the stream directly here.
     void onErrorAfterClose(oboe::AudioStream *audioStream, oboe::Result error) override;
 
 private:
@@ -98,23 +120,26 @@ private:
     // ring buffer, decode thread) is identical for both sources.
     bool startPlayback(const std::function<bool(TrackInfo *)> &openDecoder, const char *label);
 
-    // Tries the default (AAudio-preferred) API first; if that fails to
-    // open at all, retries once with OpenSL ES explicitly forced before
-    // giving up. On minSdk 26 AAudio is always technically available, so
-    // this specifically covers "AAudio exists per the API level but this
-    // device's implementation fails to open a stream" — a real, if rare,
-    // device-specific failure mode — rather than pre-API-26 Android,
-    // which this app doesn't target anyway.
+    // Opens the output stream according to the user's API / exclusive choice,
+    // falling back to the other API if the preferred one cannot open at all
+    // (a real, if rare, device-specific failure mode).
     oboe::Result openStreamLocked(int32_t sampleRate, int32_t channelCount);
-    oboe::Result tryOpenStream(int32_t sampleRate, int32_t channelCount, oboe::AudioApi audioApi);
+    oboe::Result tryOpenStream(int32_t sampleRate, int32_t channelCount,
+                               oboe::AudioApi audioApi, bool exclusive);
     void closeStreamLocked();
 
-    // Core DSP: reads from the ring buffer, applies gain*ReplayGain then
-    // the Peak Limiter per frame, writes float32 into `out`, silence-
-    // fills any underrun. Shared by onAudioReady and pullProcessedFrames
-    // so the two output paths can never drift out of sync with each
-    // other's processing. Returns frames written (== maxFrames, clamped
-    // to mReadScratch's fixed capacity — see kMaxScratchFrames in the .cpp).
+    // Makes sure a stream exists for the loaded track and is running; reopens
+    // it if the device dropped it while we were paused. Needs mStreamLock.
+    bool ensureStreamStartedLocked();
+
+    // Combines the track's REPLAYGAIN_* tags with the current mode into the
+    // single multiplier the DSP chain uses.
+    void applyReplayGain();
+
+    // Core DSP: reads from the ring buffer, runs the DSP chain, writes float32
+    // into `out`, silence-fills any underrun. Shared by onAudioReady and
+    // pullProcessedFrames so the two output paths can never drift apart.
+    // Returns frames written (clamped to mReadScratch's fixed capacity).
     int32_t processIntoFloatBuffer(float *out, int32_t maxFrames, int32_t channelCount);
     void startDecodeThread();
     void stopDecodeThread();
@@ -127,6 +152,9 @@ private:
 
     std::shared_ptr<oboe::AudioStream> mStream;
     mutable std::mutex mStreamLock;
+    // What the currently open stream was opened with (guarded by mStreamLock).
+    int mStreamApiSetting = -1;
+    bool mStreamExclusiveSetting = true;
 
     std::thread mDecodeThread;
     std::atomic<bool> mDecodeThreadRunning{false};
@@ -141,22 +169,21 @@ private:
     // while its buffer has just been flushed.
     std::atomic<bool> mLoading{false};
 
-    // Per-track multiplier derived from REPLAYGAIN_TRACK_GAIN when
-    // playTrack() opens a file; 1.0 (no adjustment) if the file has no
-    // such tag. Combined multiplicatively with mGain, both feeding the
-    // limiter below — see onAudioReady.
-    std::atomic<double> mReplayGainMultiplier{1.0};
+    // User settings (any thread).
+    std::atomic<int> mOutputApi{kApiAuto};
+    std::atomic<bool> mExclusive{true};
+    std::atomic<bool> mBitPerfect{true};
+    std::atomic<int> mReplayGainMode{kRgTrack};
+    std::atomic<bool> mLimiterEnabled{true};
 
-    // process() is only ever called from the Oboe callback thread
-    // (onAudioReady). configure()/reset() only happen inside
-    // openStreamLocked(), which itself only runs after closeStreamLocked()
-    // has stopped the stream — so there's never a concurrent callback
-    // when this is touched from the calling thread, and no lock is
-    // needed around it.
-    PeakLimiter mLimiter;
+    // process() is only ever called from the audio callback thread (or the
+    // pull path). configure() only happens inside tryOpenStream(), after the
+    // previous stream was closed, so there is never a concurrent callback.
+    DspChain mDsp;
 
     mutable std::mutex mTrackInfoLock;
     TrackInfo mTrackInfo;
+    std::string mOutputDescription;  // guarded by mTrackInfoLock
 
     std::vector<double> mReadScratch;
 };

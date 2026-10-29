@@ -11,15 +11,14 @@ data class PlaybackSnapshot(
     val isPlaying: Boolean = false,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
+    /** What the output stream really is, e.g. "AAudio · Exclusive · 96 kHz". Empty before the first song. */
+    val outputInfo: String = "",
 )
 
 /**
  * Hand-off from PlaybackService to the UI. The service runs in the app's own process, so the
- * screens can read what is playing straight from here instead of waiting for the Media3
- * MediaController to relay it. (The MediaController is still what the UI uses to *send* commands —
- * play, pause, next, seek — and it still feeds the notification, lock screen and headset buttons.)
- * Relaying state through the controller depends on message ordering and command availability;
- * this does not.
+ * screens read what is playing straight from here. (Commands travel the other way through
+ * [PlaybackController].)
  */
 object PlaybackStateBus {
     private val _snapshot = MutableStateFlow(PlaybackSnapshot())
@@ -27,5 +26,21 @@ object PlaybackStateBus {
 
     fun publish(snapshot: PlaybackSnapshot) {
         _snapshot.value = snapshot
+    }
+}
+
+/** A running sleep timer: playback is paused when [endsAtElapsedMs] (SystemClock.elapsedRealtime) is reached. */
+data class SleepTimerState(val totalMinutes: Int, val endsAtElapsedMs: Long)
+
+/**
+ * The sleep timer lives in PlaybackService (so it still fires when the screens are gone and the
+ * phone is in a pocket); this is how the Tools screen sees it.
+ */
+object SleepTimerBus {
+    private val _state = MutableStateFlow<SleepTimerState?>(null)
+    val state: StateFlow<SleepTimerState?> = _state.asStateFlow()
+
+    fun set(state: SleepTimerState?) {
+        _state.value = state
     }
 }

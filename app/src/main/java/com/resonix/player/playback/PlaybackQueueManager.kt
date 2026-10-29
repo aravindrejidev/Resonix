@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.FileNotFoundException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 private const val TAG = "PlaybackQueueManager"
 
@@ -70,6 +71,9 @@ class PlaybackQueueManager(
     private var consecutiveFailures: Int = 0
     private var queueFinished: Boolean = false
     private var released: Boolean = false
+
+    /** Pause was pressed while a song was still loading; applied the moment it starts. */
+    private var pauseWhenLoaded: Boolean = false
 
     /** Bumped for every load request; only the newest request's result is applied. */
     @Volatile
@@ -151,10 +155,31 @@ class PlaybackQueueManager(
 
     /** Resumes playback — or, if the queue already played out to its end, starts the current track again. */
     fun resumeOrRestart() {
+        pauseWhenLoaded = false
         if (queueFinished && queue.getOrNull(currentIndex) != null) {
             consecutiveFailures = 0
             playCurrent()
         } else {
+            engine.resumeTrack()
+        }
+    }
+
+    /** Pauses; if a song is still loading it will start paused. */
+    fun pause() {
+        if (_isLoading.value) pauseWhenLoaded = true
+        engine.pauseTrack()
+    }
+
+    /**
+     * Jumps to [positionMs] in the current song. If the queue had already played out to its
+     * end (the engine stopped itself), seeking brings playback back to life from that point.
+     */
+    fun seekTo(positionMs: Long) {
+        val duration = _nowPlaying.value?.let { it.info.durationMs.takeIf { d -> d > 0L } ?: it.track.durationMs } ?: 0L
+        val target = if (duration > 0L) positionMs.coerceIn(0L, (duration - 100L).coerceAtLeast(0L)) else positionMs.coerceAtLeast(0L)
+        engine.seekTo(target)
+        if (queueFinished && !_isLoading.value) {
+            queueFinished = false
             engine.resumeTrack()
         }
     }
@@ -183,6 +208,7 @@ class PlaybackQueueManager(
         val track = queue.getOrNull(index) ?: return
         val token = ++loadToken
         queueFinished = false
+        pauseWhenLoaded = false  // a fresh request means "play this"; pause() may set it again afterwards
         _isLoading.value = true
         loader.execute {
             if (token != loadToken) return@execute  // superseded while it was still waiting in line
@@ -228,6 +254,10 @@ class PlaybackQueueManager(
         when (outcome) {
             is LoadOutcome.Playing -> {
                 consecutiveFailures = 0
+                if (pauseWhenLoaded) {
+                    pauseWhenLoaded = false
+                    engine.pauseTrack()
+                }
                 _nowPlaying.value = NowPlaying(
                     track = track,
                     previous = queue.getOrNull(index - 1),
@@ -236,10 +266,13 @@ class PlaybackQueueManager(
                 )
             }
             is LoadOutcome.Failed -> {
+                pauseWhenLoaded = false
                 consecutiveFailures++
                 AppMessages.post("Can't play “${track.title}”: ${outcome.reason}")
                 if (consecutiveFailures < MAX_CONSECUTIVE_FAILURES) {
                     playNextAfterFailure()
+                } else {
+                    queueFinished = true  // gave up: Play will try this song again
                 }
             }
         }
@@ -269,5 +302,12 @@ class PlaybackQueueManager(
         loadToken++
         mainHandler.removeCallbacksAndMessages(null)
         loader.shutdownNow()
+        // The loader may be inside a native call right now; the engine must not be
+        // destroyed underneath it.
+        try {
+            loader.awaitTermination(2, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 }

@@ -9,8 +9,8 @@ import com.resonix.player.audio.NativeAudioEngine
  * the default, falling back to [AudioTrackOutputDriver] only if native
  * output couldn't be opened at all. Exposes the same method surface
  * [NativeAudioEngine] does, so anything currently holding a
- * NativeAudioEngine reference (PlaybackQueueManager, PlaybackService,
- * ResonixPlayer) can switch to holding this instead with just a
+ * NativeAudioEngine reference (PlaybackQueueManager, PlaybackService)
+ * can switch to holding this instead with just a
  * constructor-parameter type change — nothing else about how they call
  * it needs to change. Chromecast output is intentionally not included
  * here.

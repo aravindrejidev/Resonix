@@ -223,4 +223,64 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeGetGain(
     return engine != nullptr ? engine->getGain() : 1.0;
 }
 
+// --- Settings -> Audio engine --------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetOutputConfig(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint api, jboolean exclusive,
+        jboolean bitPerfect) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setOutputConfig(static_cast<int>(api), exclusive == JNI_TRUE, bitPerfect == JNI_TRUE);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetReplayGainMode(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint mode) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setReplayGainMode(static_cast<int>(mode));
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetLimiterEnabled(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jboolean enabled) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setLimiterEnabled(enabled == JNI_TRUE);
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetOutputDescription(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    std::string value = engine != nullptr ? engine->getOutputDescription() : "";
+    return env->NewStringUTF(value.c_str());
+}
+
+// --- Tools -> Sound shaping ----------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetSoundShaping(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jdouble preampDb, jdouble bassBoost,
+        jdouble stereoWidth, jdouble balance) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setPreampDb(preampDb);
+        engine->setBassBoost(bassBoost);
+        engine->setStereoWidth(stereoWidth);
+        engine->setBalance(balance);
+    }
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetAlbumGainDb(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return engine != nullptr ? engine->getAudioTrackInfo().albumGainDb : 0.0;
+}
+
 }  // extern "C"

@@ -14,6 +14,8 @@ import android.media.AudioManager
  */
 class AudioFocusManager(
     context: Context,
+    /** Whether playback is running right now — a transient loss only resumes what it actually interrupted. */
+    private val isPlaying: () -> Boolean,
     private val onPause: () -> Unit,
     private val onResume: () -> Unit,
     private val onDuck: (duck: Boolean) -> Unit
@@ -28,8 +30,8 @@ class AudioFocusManager(
                 onPause()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                pausedByFocusLoss = true
-                onPause()
+                pausedByFocusLoss = isPlaying()
+                if (pausedByFocusLoss) onPause()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 onDuck(true)

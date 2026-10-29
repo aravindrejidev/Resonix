@@ -2,36 +2,28 @@ package com.resonix.player.ui
 
 import android.Manifest
 import android.app.Application
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
-import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.session.MediaController
-import androidx.media3.session.SessionCommand
-import androidx.media3.session.SessionResult
-import androidx.media3.session.SessionToken
-import com.google.common.util.concurrent.MoreExecutors
 import com.resonix.player.data.AppDatabase
 import com.resonix.player.data.FolderScanner
 import com.resonix.player.data.MediaStoreScanner
 import com.resonix.player.data.ScannedFolder
 import com.resonix.player.data.Track
 import com.resonix.player.audio.displayFormatName
-import com.resonix.player.playback.PlaybackService
+import com.resonix.player.playback.PlaybackController
 import com.resonix.player.playback.PlaybackSnapshot
 import com.resonix.player.playback.PlaybackStateBus
+import com.resonix.player.playback.SleepTimerBus
+import com.resonix.player.playback.SleepTimerState
 import com.resonix.player.util.AppMessages
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,33 +53,25 @@ data class NowPlayingUiState(
     val durationMs: Long = 0L,
     val sampleRateHz: Int = 0,
     val bitDepth: Int = 0,
-    val format: String = ""
+    val format: String = "",
+    /** What the output stream really is, e.g. "AAudio · Exclusive · 96 kHz" (empty before the first song). */
+    val outputInfo: String = ""
 )
-
-/** A running sleep timer: playback is paused when [endsAtElapsedMs] (SystemClock.elapsedRealtime) is reached. */
-data class SleepTimerState(val totalMinutes: Int, val endsAtElapsedMs: Long)
 
 /**
  * Talks to PlaybackService in two directions, and never touches
  * NativeAudioEngine / PlaybackQueueManager directly:
- *  - commands (play, pause, next, seek, "play this folder") go out through a Media3
- *    MediaController, so playback behaves the same whether the app is foregrounded or not;
- *  - what is playing comes back through PlaybackStateBus — the service and the UI share a
- *    process, and this avoids depending on the MediaController relaying the playlist in time.
+ *  - commands (play, pause, next, seek, "play this folder") go out through PlaybackController —
+ *    plain calls into the service, which lives in the same process and is started on demand;
+ *  - what is playing comes back through PlaybackStateBus.
  */
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
-    private var mediaController: MediaController? = null
+    /** UI preferences (theme, accent, sort order, Tools values …) — the same store the service reads. */
+    val settings = AppSettings.get(application)
 
-    /** A "play this folder" request that arrived before the service connection was up. */
-    private var pendingPlayRequest: Bundle? = null
-
-    /** UI preferences (theme, accent, sort order, Tools values …). */
-    val settings = AppSettings(application)
-
-    private val _sleepTimer = MutableStateFlow<SleepTimerState?>(null)
-    val sleepTimer: StateFlow<SleepTimerState?> = _sleepTimer.asStateFlow()
-    private var sleepJob: Job? = null
+    /** The sleep timer runs inside the service, so it survives the screens going away. */
+    val sleepTimer: StateFlow<SleepTimerState?> = SleepTimerBus.state
 
     private val _uiState = MutableStateFlow(NowPlayingUiState())
     val uiState: StateFlow<NowPlayingUiState> = _uiState.asStateFlow()
@@ -109,8 +93,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val scanMutex = Mutex()
 
     init {
-        connectToPlaybackService()
-
         val context = getApplication<Application>()
         viewModelScope.launch {
             AppDatabase.getInstance(context).trackDao().getAllTracks().collect {
@@ -123,8 +105,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        // What is playing, whether it is playing, and where it is — straight from the service
-        // (see PlaybackStateBus for why this does not go through the MediaController).
+        // What is playing, whether it is playing, and where it is — straight from the service.
         viewModelScope.launch {
             PlaybackStateBus.snapshot.collect { applySnapshot(it) }
         }
@@ -135,7 +116,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private fun applySnapshot(snapshot: PlaybackSnapshot) {
         val playing = snapshot.playing
         if (playing == null) {
-            _uiState.value = NowPlayingUiState(isPlaying = snapshot.isPlaying)
+            _uiState.value = NowPlayingUiState(isPlaying = snapshot.isPlaying, outputInfo = snapshot.outputInfo)
             return
         }
         val track = playing.track
@@ -153,53 +134,23 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             sampleRateHz = if (decoderKnows) info.sampleRateHz else track.sampleRateHz,
             bitDepth = if (decoderKnows) info.bitDepth else track.bitDepth,
             format = displayFormatName(info.format.ifBlank { track.format }),
+            outputInfo = snapshot.outputInfo,
         )
     }
 
-    private fun connectToPlaybackService() {
-        val context = getApplication<Application>()
-        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
-        controllerFuture.addListener(
-            {
-                try {
-                    val controller = controllerFuture.get()
-                    mediaController = controller
-                    pendingPlayRequest?.let { request ->
-                        pendingPlayRequest = null
-                        sendPlayRequest(controller, request)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Could not connect to the playback service", e)
-                    AppMessages.post("Couldn't connect to the audio service")
-                }
-            },
-            MoreExecutors.directExecutor()
-        )
-    }
+    fun playPause() = PlaybackController.togglePlayPause()
 
-    fun playPause() {
-        val controller = mediaController ?: return
-        if (_uiState.value.isPlaying) controller.pause() else controller.play()
-    }
+    fun skipNext() = PlaybackController.next()
 
-    fun skipNext() = mediaController?.seekToNext()
+    fun skipPrevious() = PlaybackController.previous()
 
-    fun skipPrevious() = mediaController?.seekToPrevious()
-
-    fun seekTo(positionMs: Long) {
-        mediaController?.seekTo(positionMs)
-    }
+    fun seekTo(positionMs: Long) = PlaybackController.seekTo(positionMs)
 
     /**
-     * Plays every track in [track]'s folder as a queue, starting from
-     * this one. The standard Player interface has no "play this folder"
-     * concept, so this goes through the PLAY_FOLDER custom session
-     * command PlaybackService declares. Note: MediaStore-sourced tracks
-     * don't carry folder info (folderPath is blank for them), so tapping
-     * one currently queues all MediaStore-sourced tracks together rather
-     * than a specific folder — only folder-scanned tracks get true
-     * per-folder queues right now.
+     * Plays every track in [track]'s folder as a queue, starting from this one. Note:
+     * MediaStore-sourced tracks don't carry folder info (folderPath is blank for them), so
+     * tapping one currently queues all MediaStore-sourced tracks together rather than a
+     * specific folder — only folder-scanned tracks get true per-folder queues right now.
      */
     fun playTrackFolder(track: Track, shuffle: Boolean = false) {
         playFolder(track.rootFolderUri, track.folderPath, shuffle, startContentUri = track.contentUri)
@@ -214,43 +165,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         shuffle: Boolean = false,
         startContentUri: String? = null,
     ) {
-        val request = Bundle().apply {
-            putString(PlaybackService.ARG_ROOT_FOLDER_URI, rootFolderUri)
-            putString(PlaybackService.ARG_FOLDER_PATH, folderPath)
-            putBoolean(PlaybackService.ARG_SHUFFLE, shuffle)
-            if (startContentUri != null) putString(PlaybackService.ARG_START_URI, startContentUri)
-            // Same order as the list the user is looking at.
-            val sort = settings.state.value
-            putString(PlaybackService.ARG_SORT_KEY, sort.sortKey.name)
-            putBoolean(PlaybackService.ARG_SORT_ASCENDING, sort.sortAscending)
-        }
-        val controller = mediaController
-        if (controller == null) {
-            pendingPlayRequest = request  // sent as soon as the service connection is up
-            return
-        }
-        sendPlayRequest(controller, request)
-    }
-
-    private fun sendPlayRequest(controller: MediaController, request: Bundle) {
-        val result = controller.sendCustomCommand(
-            SessionCommand(PlaybackService.COMMAND_PLAY_FOLDER, Bundle.EMPTY),
-            request
-        )
-        result.addListener(
-            {
-                try {
-                    val code = result.get().resultCode
-                    if (code != SessionResult.RESULT_SUCCESS) {
-                        Log.w(TAG, "Play command rejected: $code")
-                        AppMessages.post("Couldn't start playback (error $code)")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Play command failed", e)
-                    AppMessages.post("Couldn't start playback")
-                }
-            },
-            MoreExecutors.directExecutor()
+        // Same order as the list the user is looking at.
+        val sort = settings.state.value
+        PlaybackController.playFolder(
+            context = getApplication(),
+            rootFolderUri = rootFolderUri,
+            folderPath = folderPath,
+            shuffle = shuffle,
+            startContentUri = startContentUri,
+            sortKey = sort.sortKey.name,
+            sortAscending = sort.sortAscending,
         )
     }
 
@@ -345,27 +269,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun tracksUnderRoot(rootUri: String) =
         AppDatabase.getInstance(getApplication()).trackDao().getTracksUnderRootFlow(rootUri)
 
-    /**
-     * Pauses playback after [minutes]; 0 cancels. Lives in the ViewModel, so it survives rotation
-     * and the app being backgrounded, but not the app being swiped away.
-     */
+    /** Pauses playback after [minutes]; 0 cancels. The timer itself lives in PlaybackService. */
     fun setSleepTimer(minutes: Int) {
-        sleepJob?.cancel()
-        if (minutes <= 0) {
-            _sleepTimer.value = null
-            return
-        }
-        val durationMs = minutes * 60_000L
-        _sleepTimer.value = SleepTimerState(minutes, SystemClock.elapsedRealtime() + durationMs)
-        sleepJob = viewModelScope.launch {
-            delay(durationMs)
-            mediaController?.pause()
-            _sleepTimer.value = null
-        }
-    }
-
-    override fun onCleared() {
-        mediaController?.release()
-        super.onCleared()
+        PlaybackController.setSleepTimer(getApplication(), minutes)
     }
 }
