@@ -21,3 +21,27 @@
 
 ## Still to do
 * Equalizer (UI only; `eqEnabled` / `eqBands` / `eqPreset` are saved but not applied). Plug it into `DspChain::process` in `cpp/Dsp.h`, before the limiter.
+
+---
+
+# Round 2 – Now Playing redesign, full-frame artwork, sectioned Settings
+
+## Now Playing (`ui/screens/NowPlayingScreen.kt`)
+One structure, two looks – top bar (close · "Playing from <folder>" · ⋮) → artwork → title / artist →
+seek bar + times → transport → [volume] → output line.
+* **Full-frame artwork** (default): the cover fills the top of the screen edge-to-edge, fades into a
+  background tinted from the cover's own colours (`ui/ArtPalette.kt`), flat Apple-style controls,
+  "Hi-Res Lossless / Lossless" badge under the seek bar, quality caption on the cover, drag the cover
+  down to close, status-bar icons forced light while it is showing.
+* **Framed**: the previous raised-plate look, now on the same structure (left-aligned title block,
+  quality chips, ⋮ menu).
+* **⋮ menu** (`ui/components/PlayerMenu.kt`): Full-frame artwork on/off · Keep screen on · Sound tools.
+
+## Settings (`ui/screens/SettingsScreen.kt`)
+The one long list is now a list of **sections**, each opening its own page of grouped settings:
+Appearance · Player · Library · Audio engine · About. Every row on the main list shows what is
+currently chosen. System Back (and tapping the Settings tab again) steps out of a section.
+* New: Player → **Full-frame artwork** switch (same setting as the ⋮ menu: `SettingsState.fullFrameArt`).
+
+## Other
+* `NowPlayingUiState` gained `channelCount`, `bitrateKbps`, `source` (folder name).

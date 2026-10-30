@@ -65,6 +65,7 @@ import com.resonix.player.ui.neo.neoBackground
 import com.resonix.player.ui.screens.HomeScreen
 import com.resonix.player.ui.screens.NowPlayingScreen
 import com.resonix.player.ui.screens.SearchScreen
+import com.resonix.player.ui.screens.SettingsPage
 import com.resonix.player.ui.screens.SettingsScreen
 import com.resonix.player.ui.screens.ToolsScreen
 import com.resonix.player.ui.theme.LocalNeoColors
@@ -105,6 +106,8 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var homeSource by rememberSaveable { mutableStateOf<String?>(null) }
     var homePath by rememberSaveable { mutableStateOf("") }
+    // Which section of Settings is open (null = the list of sections).
+    var settingsPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
 
     // Scroll positions live here so they survive switching tabs.
     val homeListState = rememberLazyListState()
@@ -186,6 +189,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
         when {
             showNowPlaying -> showNowPlaying = false
             showSearch -> showSearch = false
+            tab == NavTab.SETTINGS && settingsPage != null -> settingsPage = null
             tab != NavTab.HOME -> tab = NavTab.HOME
             homePath.isNotEmpty() -> homePath = homePath.substringBeforeLast('/', "")
         }
@@ -252,6 +256,8 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     isScanningDevice = isScanningDevice,
                     scrollState = settingsScroll,
                     bottomInset = bottomInset,
+                    page = settingsPage,
+                    onPageChange = { settingsPage = it },
                     onChange = { transform -> viewModel.settings.update(transform) },
                     onAddFolder = { folderPicker.launch(null) },
                     onScanDevice = scanDevice,
@@ -299,7 +305,14 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     onOpen = { showNowPlaying = true },
                 )
             }
-            FloatingNavBar(selected = tab, onSelect = { tab = it })
+            FloatingNavBar(
+                selected = tab,
+                onSelect = { selected ->
+                    // Tapping Settings again steps back out to the list of sections.
+                    if (selected == tab && selected == NavTab.SETTINGS) settingsPage = null
+                    tab = selected
+                },
+            )
         }
 
         // ── full-screen Search ──
@@ -330,10 +343,13 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
         ) {
             NowPlayingScreen(
                 state = nowPlaying,
+                fullFrameArt = settings.fullFrameArt,
                 keepScreenOn = settings.keepScreenOn,
                 showVolume = settings.directVolume,
                 volume = settings.directVolumeLevel,
                 onVolumeChange = { level -> viewModel.settings.update { it.copy(directVolumeLevel = level) } },
+                onToggleFullFrameArt = { viewModel.settings.update { it.copy(fullFrameArt = !it.fullFrameArt) } },
+                onToggleKeepScreenOn = { viewModel.settings.update { it.copy(keepScreenOn = !it.keepScreenOn) } },
                 onPlayPause = { viewModel.playPause() },
                 onNext = { viewModel.skipNext() },
                 onPrevious = { viewModel.skipPrevious() },

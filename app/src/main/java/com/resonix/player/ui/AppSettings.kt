@@ -55,6 +55,8 @@ data class SettingsState(
 
     // Playback
     val keepScreenOn: Boolean = true,
+    /** Now Playing: the cover fills the top of the screen (tinted background) instead of sitting on a plate. */
+    val fullFrameArt: Boolean = true,
 
     // Audio engine
     val outputEngine: OutputEngine = OutputEngine.AUTO,
@@ -122,6 +124,7 @@ class AppSettings private constructor(context: Context) {
             sortAscending = prefs.getBoolean(KEY_SORT_ASC, d.sortAscending),
             lastSourceKey = prefs.getString(KEY_SOURCE, null),
             keepScreenOn = prefs.getBoolean(KEY_KEEP_ON, d.keepScreenOn),
+            fullFrameArt = prefs.getBoolean(KEY_FULL_FRAME_ART, d.fullFrameArt),
             outputEngine = parseEnum(prefs.getString(KEY_OUTPUT, null), d.outputEngine),
             exclusiveMode = prefs.getBoolean(KEY_EXCLUSIVE, d.exclusiveMode),
             bitPerfect = prefs.getBoolean(KEY_BIT_PERFECT, d.bitPerfect),
@@ -150,6 +153,7 @@ class AppSettings private constructor(context: Context) {
             .putBoolean(KEY_SORT_ASC, s.sortAscending)
             .putString(KEY_SOURCE, s.lastSourceKey)
             .putBoolean(KEY_KEEP_ON, s.keepScreenOn)
+            .putBoolean(KEY_FULL_FRAME_ART, s.fullFrameArt)
             .putString(KEY_OUTPUT, s.outputEngine.name)
             .putBoolean(KEY_EXCLUSIVE, s.exclusiveMode)
             .putBoolean(KEY_BIT_PERFECT, s.bitPerfect)
@@ -186,6 +190,7 @@ class AppSettings private constructor(context: Context) {
         private const val KEY_SORT_ASC = "sort_ascending"
         private const val KEY_SOURCE = "last_source_key"
         private const val KEY_KEEP_ON = "keep_screen_on"
+        private const val KEY_FULL_FRAME_ART = "full_frame_art"
         private const val KEY_OUTPUT = "output_engine"
         private const val KEY_EXCLUSIVE = "exclusive_mode"
         private const val KEY_BIT_PERFECT = "bit_perfect"

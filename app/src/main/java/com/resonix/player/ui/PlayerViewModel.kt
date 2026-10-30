@@ -54,6 +54,10 @@ data class NowPlayingUiState(
     val sampleRateHz: Int = 0,
     val bitDepth: Int = 0,
     val format: String = "",
+    val channelCount: Int = 0,
+    val bitrateKbps: Int = 0,
+    /** Where the song comes from (its folder), for the "Playing from …" line. */
+    val source: String = "",
     /** What the output stream really is, e.g. "AAudio · Exclusive · 96 kHz" (empty before the first song). */
     val outputInfo: String = ""
 )
@@ -134,6 +138,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             sampleRateHz = if (decoderKnows) info.sampleRateHz else track.sampleRateHz,
             bitDepth = if (decoderKnows) info.bitDepth else track.bitDepth,
             format = displayFormatName(info.format.ifBlank { track.format }),
+            channelCount = if (decoderKnows) info.channelCount else 0,
+            bitrateKbps = ((if (decoderKnows && info.bitrateBps > 0L) info.bitrateBps else track.bitrateBps) / 1000L).toInt(),
+            source = track.folderName,
             outputInfo = snapshot.outputInfo,
         )
     }

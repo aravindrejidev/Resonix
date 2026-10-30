@@ -2,9 +2,11 @@ package com.resonix.player.ui.screens
 
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.animation.Crossfade
 import androidx.activity.ComponentActivity
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -70,7 +73,30 @@ import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
 import com.resonix.player.ui.theme.ThemeMode
 
-/** Settings: appearance, library, display, audio engine and about. */
+/**
+ * The sections of Settings. The main page lists them as rows (with a one-line summary of what is
+ * currently chosen); each opens its own page of grouped settings.
+ */
+enum class SettingsPage(val title: String, val tagline: String) {
+    APPEARANCE("Appearance", "Theme, colour and feedback"),
+    PLAYER("Player", "Now Playing and notifications"),
+    LIBRARY("Library", "Folders, scanning and lists"),
+    AUDIO("Audio engine", "Output, volume and loudness"),
+    ABOUT("About", "Version and licences"),
+}
+
+private fun SettingsPage.icon(): ImageVector = when (this) {
+    SettingsPage.APPEARANCE -> NeoIcons.Palette
+    SettingsPage.PLAYER -> NeoIcons.Music
+    SettingsPage.LIBRARY -> NeoIcons.Library
+    SettingsPage.AUDIO -> NeoIcons.Equalizer
+    SettingsPage.ABOUT -> NeoIcons.Info
+}
+
+/**
+ * Settings, in sections. [page] is the section that is open (`null` = the main list); the caller
+ * owns it so the system Back button can step out of a section.
+ */
 @Composable
 fun SettingsScreen(
     settings: SettingsState,
@@ -79,13 +105,14 @@ fun SettingsScreen(
     isScanningDevice: Boolean,
     scrollState: ScrollState,
     bottomInset: Dp,
+    page: SettingsPage?,
+    onPageChange: (SettingsPage?) -> Unit,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
     onAddFolder: () -> Unit,
     onScanDevice: () -> Unit,
     onRescanFolder: (rootUri: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val neo = LocalNeoColors.current
     val context = LocalContext.current
     val versionName = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
@@ -106,8 +133,88 @@ fun SettingsScreen(
         onDispose { activity?.lifecycle?.removeObserver(observer) }
     }
 
+    Crossfade(
+        targetState = page,
+        modifier = modifier.fillMaxSize(),
+        animationSpec = tween(200),
+        label = "settingsPage",
+    ) { shown ->
+        if (shown == null) {
+            SettingsHome(
+                settings = settings,
+                folderCount = folders.size,
+                versionName = versionName,
+                scrollState = scrollState,
+                bottomInset = bottomInset,
+                onOpen = { onPageChange(it) },
+            )
+        } else {
+            SettingsDetail(
+                page = shown,
+                bottomInset = bottomInset,
+                onBack = { onPageChange(null) },
+            ) {
+                when (shown) {
+                    SettingsPage.APPEARANCE -> AppearanceSection(settings, onChange)
+                    SettingsPage.PLAYER -> PlayerSection(settings, notificationsOn, onChange) {
+                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        try {
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            // No settings page to open on this device — nothing more we can do.
+                        }
+                    }
+                    SettingsPage.LIBRARY -> LibrarySection(
+                        settings = settings,
+                        folders = folders,
+                        scanningFolderUri = scanningFolderUri,
+                        isScanningDevice = isScanningDevice,
+                        onChange = onChange,
+                        onAddFolder = onAddFolder,
+                        onScanDevice = onScanDevice,
+                        onRescanFolder = onRescanFolder,
+                    )
+                    SettingsPage.AUDIO -> AudioSection(settings, onChange)
+                    SettingsPage.ABOUT -> AboutSection(versionName)
+                }
+            }
+        }
+    }
+}
+
+// ───────────────────────────── main list ─────────────────────────────
+
+@Composable
+private fun SettingsHome(
+    settings: SettingsState,
+    folderCount: Int,
+    versionName: String,
+    scrollState: ScrollState,
+    bottomInset: Dp,
+    onOpen: (SettingsPage) -> Unit,
+) {
+    val neo = LocalNeoColors.current
+
+    fun summary(page: SettingsPage): String = when (page) {
+        SettingsPage.APPEARANCE -> "${settings.themeMode.label} · ${settings.accent.label}"
+        SettingsPage.PLAYER -> if (settings.fullFrameArt) "Full-frame artwork" else "Artwork on a plate"
+        SettingsPage.LIBRARY -> when (folderCount) {
+            0 -> "No folders yet"
+            1 -> "1 folder"
+            else -> "$folderCount folders"
+        }
+        SettingsPage.AUDIO -> buildString {
+            append(settings.outputEngine.label)
+            if (settings.exclusiveMode) append(" · Exclusive")
+            if (settings.bitPerfect) append(" · Bit-perfect")
+        }
+        SettingsPage.ABOUT -> "Version $versionName"
+    }
+
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .verticalScroll(scrollState)
             .statusBarsPadding()
@@ -116,202 +223,20 @@ fun SettingsScreen(
     ) {
         ScreenHeader(title = "Settings", subtitle = "Make Resonix yours")
 
-        SettingsGroup("Appearance") {
-            ChoiceRow(
-                icon = NeoIcons.DarkMode,
-                title = "Theme",
-                subtitle = "Follow your phone, or pick one",
-                options = ThemeMode.entries.map { it.label },
-                selectedIndex = settings.themeMode.ordinal,
-                onSelect = { index -> onChange { it.copy(themeMode = ThemeMode.entries[index]) } },
-            )
+        SettingsGroup("Preferences") {
+            SettingsEntry(SettingsPage.APPEARANCE, summary(SettingsPage.APPEARANCE), onOpen)
             SettingsDivider()
-            AccentRow(
-                selected = settings.accent,
-                onSelect = { accent -> onChange { it.copy(accent = accent) } },
-            )
+            SettingsEntry(SettingsPage.PLAYER, summary(SettingsPage.PLAYER), onOpen)
             SettingsDivider()
-            ToggleRow(
-                icon = NeoIcons.Haptics,
-                title = "Haptic feedback",
-                subtitle = "A small tick when you press a control",
-                checked = settings.haptics,
-                onCheckedChange = { on -> onChange { it.copy(haptics = on) } },
-            )
+            SettingsEntry(SettingsPage.LIBRARY, summary(SettingsPage.LIBRARY), onOpen)
         }
 
-        SettingsGroup("Library") {
-            if (folders.isEmpty()) {
-                SettingRow(
-                    icon = NeoIcons.FolderOpen,
-                    title = "No folders yet",
-                    subtitle = "Add the folder your music lives in",
-                )
-            }
-            folders.forEach { folder ->
-                SettingRow(
-                    icon = NeoIcons.Folder,
-                    title = folder.displayName.ifBlank { "Music" },
-                    subtitle = "Last scanned ${formatRelativeTime(folder.lastScannedAtSec)}",
-                    trailing = {
-                        if (scanningFolderUri == folder.rootUri) {
-                            NeoLoader(diameter = 24.dp)
-                        } else {
-                            NeoIconButton(
-                                icon = NeoIcons.Refresh,
-                                onClick = { onRescanFolder(folder.rootUri) },
-                                diameter = 40.dp,
-                                iconSize = 20.dp,
-                                contentDescription = "Rescan ${folder.displayName}",
-                            )
-                        }
-                    },
-                )
-                SettingsDivider()
-            }
-            ActionRow(
-                icon = NeoIcons.FolderAdd,
-                title = "Add music folder",
-                subtitle = "Pick a folder to play from",
-                onClick = onAddFolder,
-            )
-            SettingsDivider()
-            ActionRow(
-                icon = NeoIcons.Phone,
-                title = "Scan device library",
-                subtitle = "Also find songs indexed by Android",
-                onClick = onScanDevice,
-                busy = isScanningDevice,
-            )
+        SettingsGroup("Sound") {
+            SettingsEntry(SettingsPage.AUDIO, summary(SettingsPage.AUDIO), onOpen)
         }
 
-        SettingsGroup("Display") {
-            ToggleRow(
-                icon = NeoIcons.HiRes,
-                title = "Quality badges",
-                subtitle = "Show format, bit depth and sample rate in lists",
-                checked = settings.showQualityBadges,
-                onCheckedChange = { on -> onChange { it.copy(showQualityBadges = on) } },
-            )
-            SettingsDivider()
-            ToggleRow(
-                icon = NeoIcons.Image,
-                title = "Album art",
-                subtitle = "Show cover thumbnails in lists",
-                checked = settings.showAlbumArt,
-                onCheckedChange = { on -> onChange { it.copy(showAlbumArt = on) } },
-            )
-            SettingsDivider()
-            ToggleRow(
-                icon = NeoIcons.Phone,
-                title = "Keep screen on",
-                subtitle = "While the full-screen player is open",
-                checked = settings.keepScreenOn,
-                onCheckedChange = { on -> onChange { it.copy(keepScreenOn = on) } },
-            )
-        }
-
-        SettingsGroup("Playback") {
-            ActionRow(
-                icon = NeoIcons.Headphones,
-                title = "Notification controls",
-                subtitle = if (notificationsOn) {
-                    "On — play, pause and skip from the notification and lock screen"
-                } else {
-                    "Off — tap to allow notifications so the phone's media player can show"
-                },
-                onClick = {
-                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    try {
-                        context.startActivity(intent)
-                    } catch (e: Exception) {
-                        // No settings page to open on this device — nothing more we can do.
-                    }
-                },
-            )
-        }
-
-        SettingsGroup("Audio engine") {
-            ChoiceRow(
-                icon = NeoIcons.Headphones,
-                title = "Output",
-                subtitle = "Auto picks the best backend; if one can't open, the other is used",
-                options = OutputEngine.entries.map { it.label },
-                selectedIndex = settings.outputEngine.ordinal,
-                onSelect = { index -> onChange { it.copy(outputEngine = OutputEngine.entries[index]) } },
-            )
-            SettingsDivider()
-            ToggleRow(
-                icon = NeoIcons.Lock,
-                title = "Exclusive mode",
-                subtitle = "Ask for sole access to the output stream (AAudio)",
-                checked = settings.exclusiveMode,
-                onCheckedChange = { on -> onChange { it.copy(exclusiveMode = on) } },
-            )
-            SettingsDivider()
-            ToggleRow(
-                icon = NeoIcons.Bolt,
-                title = "Bit-perfect output",
-                subtitle = "On: each song plays at its own sample rate. Off: everything at 48 kHz (from the next song)",
-                checked = settings.bitPerfect,
-                onCheckedChange = { on -> onChange { it.copy(bitPerfect = on) } },
-            )
-            SettingsDivider()
-            ToggleRow(
-                icon = NeoIcons.Volume,
-                title = "Direct volume control",
-                subtitle = "Set the level inside the engine",
-                checked = settings.directVolume,
-                onCheckedChange = { on -> onChange { it.copy(directVolume = on) } },
-            )
-            if (settings.directVolume) {
-                SettingsDivider()
-                SliderRow(
-                    title = "Volume level",
-                    valueText = "${(settings.directVolumeLevel * 100f).toInt()}%",
-                    value = settings.directVolumeLevel,
-                    onValueChange = { level -> onChange { it.copy(directVolumeLevel = level) } },
-                )
-            }
-            SettingsDivider()
-            ChoiceRow(
-                icon = NeoIcons.Equalizer,
-                title = "ReplayGain",
-                subtitle = "Even out loudness between tracks",
-                options = ReplayGainMode.entries.map { it.label },
-                selectedIndex = settings.replayGain.ordinal,
-                onSelect = { index -> onChange { it.copy(replayGain = ReplayGainMode.entries[index]) } },
-            )
-            SettingsDivider()
-            ToggleRow(
-                icon = NeoIcons.Shield,
-                title = "Peak limiter",
-                subtitle = "Stop clipping when gain is applied",
-                checked = settings.peakLimiter,
-                onCheckedChange = { on -> onChange { it.copy(peakLimiter = on) } },
-            )
-        }
-
-        SettingsGroup("About") {
-            SettingRow(
-                icon = NeoIcons.Music,
-                title = "Resonix",
-                subtitle = "Version $versionName",
-            )
-            SettingsDivider()
-            SettingRow(
-                icon = NeoIcons.Code,
-                title = "Open source",
-                subtitle = "Licensed under GPL-3.0",
-            )
-            SettingsDivider()
-            SettingRow(
-                icon = NeoIcons.Info,
-                title = "Built with",
-                subtitle = "Oboe · FFmpeg · Jetpack Compose",
-            )
+        SettingsGroup("App") {
+            SettingsEntry(SettingsPage.ABOUT, summary(SettingsPage.ABOUT), onOpen)
         }
 
         Text(
@@ -323,6 +248,291 @@ fun SettingsScreen(
                 .padding(top = 2.dp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** A row on the main list: the section's icon and name, with what is currently chosen under it. */
+@Composable
+private fun SettingsEntry(page: SettingsPage, summary: String, onOpen: (SettingsPage) -> Unit) {
+    ActionRow(
+        icon = page.icon(),
+        title = page.title,
+        subtitle = summary,
+        onClick = { onOpen(page) },
+    )
+}
+
+/** One section's page: a back button and title on top, then its groups. */
+@Composable
+private fun SettingsDetail(
+    page: SettingsPage,
+    bottomInset: Dp,
+    onBack: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val neo = LocalNeoColors.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .statusBarsPadding()
+            .padding(start = 22.dp, end = 22.dp, bottom = bottomInset),
+        verticalArrangement = Arrangement.spacedBy(22.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 14.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            NeoIconButton(icon = NeoIcons.Back, onClick = onBack, contentDescription = "Back to settings")
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "SETTINGS", color = neo.accent, style = NeoType.overline)
+                Text(text = page.title, color = neo.textPrimary, style = NeoType.title, maxLines = 1)
+                Text(text = page.tagline, color = neo.textSecondary, style = NeoType.caption, maxLines = 1)
+            }
+        }
+        content()
+    }
+}
+
+// ───────────────────────────── the sections ─────────────────────────────
+
+@Composable
+private fun AppearanceSection(
+    settings: SettingsState,
+    onChange: ((SettingsState) -> SettingsState) -> Unit,
+) {
+    SettingsGroup("Theme") {
+        ChoiceRow(
+            icon = NeoIcons.DarkMode,
+            title = "Theme",
+            subtitle = "Follow your phone, or pick one",
+            options = ThemeMode.entries.map { it.label },
+            selectedIndex = settings.themeMode.ordinal,
+            onSelect = { index -> onChange { it.copy(themeMode = ThemeMode.entries[index]) } },
+        )
+        SettingsDivider()
+        AccentRow(
+            selected = settings.accent,
+            onSelect = { accent -> onChange { it.copy(accent = accent) } },
+        )
+    }
+    SettingsGroup("Feedback") {
+        ToggleRow(
+            icon = NeoIcons.Haptics,
+            title = "Haptic feedback",
+            subtitle = "A small tick when you press a control",
+            checked = settings.haptics,
+            onCheckedChange = { on -> onChange { it.copy(haptics = on) } },
+        )
+    }
+}
+
+@Composable
+private fun PlayerSection(
+    settings: SettingsState,
+    notificationsOn: Boolean,
+    onChange: ((SettingsState) -> SettingsState) -> Unit,
+    onOpenNotificationSettings: () -> Unit,
+) {
+    SettingsGroup("Now Playing") {
+        ToggleRow(
+            icon = NeoIcons.Image,
+            title = "Full-frame artwork",
+            subtitle = "The cover fills the top of the player and tints its background. Also in the player's ⋮ menu",
+            checked = settings.fullFrameArt,
+            onCheckedChange = { on -> onChange { it.copy(fullFrameArt = on) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Phone,
+            title = "Keep screen on",
+            subtitle = "While the full-screen player is open",
+            checked = settings.keepScreenOn,
+            onCheckedChange = { on -> onChange { it.copy(keepScreenOn = on) } },
+        )
+    }
+    SettingsGroup("Notifications") {
+        ActionRow(
+            icon = NeoIcons.Headphones,
+            title = "Notification controls",
+            subtitle = if (notificationsOn) {
+                "On — play, pause and skip from the notification and lock screen"
+            } else {
+                "Off — tap to allow notifications so the phone's media player can show"
+            },
+            onClick = onOpenNotificationSettings,
+        )
+    }
+}
+
+@Composable
+private fun LibrarySection(
+    settings: SettingsState,
+    folders: List<ScannedFolder>,
+    scanningFolderUri: String?,
+    isScanningDevice: Boolean,
+    onChange: ((SettingsState) -> SettingsState) -> Unit,
+    onAddFolder: () -> Unit,
+    onScanDevice: () -> Unit,
+    onRescanFolder: (rootUri: String) -> Unit,
+) {
+    SettingsGroup("Music folders") {
+        if (folders.isEmpty()) {
+            SettingRow(
+                icon = NeoIcons.FolderOpen,
+                title = "No folders yet",
+                subtitle = "Add the folder your music lives in",
+            )
+            SettingsDivider()
+        }
+        folders.forEach { folder ->
+            SettingRow(
+                icon = NeoIcons.Folder,
+                title = folder.displayName.ifBlank { "Music" },
+                subtitle = "Last scanned ${formatRelativeTime(folder.lastScannedAtSec)}",
+                trailing = {
+                    if (scanningFolderUri == folder.rootUri) {
+                        NeoLoader(diameter = 24.dp)
+                    } else {
+                        NeoIconButton(
+                            icon = NeoIcons.Refresh,
+                            onClick = { onRescanFolder(folder.rootUri) },
+                            diameter = 40.dp,
+                            iconSize = 20.dp,
+                            contentDescription = "Rescan ${folder.displayName}",
+                        )
+                    }
+                },
+            )
+            SettingsDivider()
+        }
+        ActionRow(
+            icon = NeoIcons.FolderAdd,
+            title = "Add music folder",
+            subtitle = "Pick a folder to play from",
+            onClick = onAddFolder,
+        )
+    }
+    SettingsGroup("Device") {
+        ActionRow(
+            icon = NeoIcons.Phone,
+            title = "Scan device library",
+            subtitle = "Also find songs indexed by Android",
+            onClick = onScanDevice,
+            busy = isScanningDevice,
+        )
+    }
+    SettingsGroup("Song lists") {
+        ToggleRow(
+            icon = NeoIcons.HiRes,
+            title = "Quality badges",
+            subtitle = "Show format, bit depth and sample rate in lists",
+            checked = settings.showQualityBadges,
+            onCheckedChange = { on -> onChange { it.copy(showQualityBadges = on) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Image,
+            title = "Album art",
+            subtitle = "Show cover thumbnails in lists",
+            checked = settings.showAlbumArt,
+            onCheckedChange = { on -> onChange { it.copy(showAlbumArt = on) } },
+        )
+    }
+}
+
+@Composable
+private fun AudioSection(
+    settings: SettingsState,
+    onChange: ((SettingsState) -> SettingsState) -> Unit,
+) {
+    SettingsGroup("Output") {
+        ChoiceRow(
+            icon = NeoIcons.Headphones,
+            title = "Output",
+            subtitle = "Auto picks the best backend; if one can't open, the other is used",
+            options = OutputEngine.entries.map { it.label },
+            selectedIndex = settings.outputEngine.ordinal,
+            onSelect = { index -> onChange { it.copy(outputEngine = OutputEngine.entries[index]) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Lock,
+            title = "Exclusive mode",
+            subtitle = "Ask for sole access to the output stream (AAudio)",
+            checked = settings.exclusiveMode,
+            onCheckedChange = { on -> onChange { it.copy(exclusiveMode = on) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Bolt,
+            title = "Bit-perfect output",
+            subtitle = "On: each song plays at its own sample rate. Off: everything at 48 kHz (from the next song)",
+            checked = settings.bitPerfect,
+            onCheckedChange = { on -> onChange { it.copy(bitPerfect = on) } },
+        )
+    }
+    SettingsGroup("Volume") {
+        ToggleRow(
+            icon = NeoIcons.Volume,
+            title = "Direct volume control",
+            subtitle = "Set the level inside the engine, with a slider in the player",
+            checked = settings.directVolume,
+            onCheckedChange = { on -> onChange { it.copy(directVolume = on) } },
+        )
+        if (settings.directVolume) {
+            SettingsDivider()
+            SliderRow(
+                title = "Volume level",
+                valueText = "${(settings.directVolumeLevel * 100f).toInt()}%",
+                value = settings.directVolumeLevel,
+                onValueChange = { level -> onChange { it.copy(directVolumeLevel = level) } },
+            )
+        }
+    }
+    SettingsGroup("Loudness") {
+        ChoiceRow(
+            icon = NeoIcons.Equalizer,
+            title = "ReplayGain",
+            subtitle = "Even out loudness between tracks",
+            options = ReplayGainMode.entries.map { it.label },
+            selectedIndex = settings.replayGain.ordinal,
+            onSelect = { index -> onChange { it.copy(replayGain = ReplayGainMode.entries[index]) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Shield,
+            title = "Peak limiter",
+            subtitle = "Stop clipping when gain is applied",
+            checked = settings.peakLimiter,
+            onCheckedChange = { on -> onChange { it.copy(peakLimiter = on) } },
+        )
+    }
+}
+
+@Composable
+private fun AboutSection(versionName: String) {
+    SettingsGroup("Resonix") {
+        SettingRow(
+            icon = NeoIcons.Music,
+            title = "Resonix",
+            subtitle = "Version $versionName",
+        )
+        SettingsDivider()
+        SettingRow(
+            icon = NeoIcons.Code,
+            title = "Open source",
+            subtitle = "Licensed under GPL-3.0",
+        )
+        SettingsDivider()
+        SettingRow(
+            icon = NeoIcons.Info,
+            title = "Built with",
+            subtitle = "Oboe · FFmpeg · Jetpack Compose",
         )
     }
 }
