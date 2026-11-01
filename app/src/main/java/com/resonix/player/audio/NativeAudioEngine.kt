@@ -148,6 +148,27 @@ class NativeAudioEngine {
         if (nativeHandle != 0L) nativeSetSoundShaping(nativeHandle, preampDb, bassBoost, stereoWidth, balance)
     }
 
+    /**
+     * Where and in what shape the audio leaves the app (see AudioEngine::setOutputPlan). Set before
+     * each track and whenever the output device changes. [deviceId] 0 = whatever Android routes to;
+     * [forcedRateHz] 0 = follow the Bit-perfect setting; [formatPref] OutputFormat.nativeValue;
+     * [bitPerfectMixer] the Android 14 bit-perfect mixer is engaged for this stream; [nativeRateHz]
+     * the device's own mixer rate.
+     */
+    fun setOutputPlan(deviceId: Int, forcedRateHz: Int, formatPref: Int, bitPerfectMixer: Boolean, nativeRateHz: Int) {
+        if (nativeHandle != 0L) nativeSetOutputPlan(nativeHandle, deviceId, forcedRateHz, formatPref, bitPerfectMixer, nativeRateHz)
+    }
+
+    /** The next [playTrackFd]/[playTrack] starts at [positionMs] instead of the beginning. */
+    fun setNextStartPosition(positionMs: Long) {
+        if (nativeHandle != 0L) nativeSetNextStartPosition(nativeHandle, positionMs)
+    }
+
+    /** [ditherMode]: 0 Off, 1 Auto, 2 Always. [resamplerQuality]: 0 Standard, 1 High, 2 Maximum. */
+    fun setFidelity(ditherMode: Int, resamplerQuality: Int) {
+        if (nativeHandle != 0L) nativeSetFidelity(nativeHandle, ditherMode, resamplerQuality)
+    }
+
     /** What the output stream really is, e.g. "AAudio · Exclusive · 96 kHz". Empty before the first song. */
     fun getOutputDescription(): String {
         return if (nativeHandle != 0L) nativeGetOutputDescription(nativeHandle) else ""
@@ -209,6 +230,16 @@ class NativeAudioEngine {
         balance: Double
     )
     private external fun nativeGetAlbumGainDb(handle: Long): Double
+    private external fun nativeSetOutputPlan(
+        handle: Long,
+        deviceId: Int,
+        forcedRateHz: Int,
+        formatPref: Int,
+        bitPerfectMixer: Boolean,
+        nativeRateHz: Int
+    )
+    private external fun nativeSetFidelity(handle: Long, ditherMode: Int, resamplerQuality: Int)
+    private external fun nativeSetNextStartPosition(handle: Long, positionMs: Long)
     private external fun nativePullSamples(
         handle: Long,
         outBuffer: FloatArray,

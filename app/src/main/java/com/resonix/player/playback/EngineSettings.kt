@@ -20,6 +20,10 @@ internal object EngineSettings {
         )
         engine.setReplayGainMode(s.replayGain.ordinal)  // Off / Track / Album
         engine.setLimiterEnabled(s.peakLimiter)
+        engine.setFidelity(
+            ditherMode = s.dither.ordinal,                // Off / Auto / Always
+            resamplerQuality = s.resamplerQuality.ordinal, // Standard / High / Maximum
+        )
         engine.setSoundShaping(
             preampDb = s.preamp.toDouble(),
             bassBoost = s.bassBoost.toDouble(),
@@ -29,13 +33,8 @@ internal object EngineSettings {
     }
 
     /**
-     * Direct volume control: the level inside the engine. A squared taper, so the lower half
-     * of the slider has useful resolution (50 % ≈ −12 dB, 10 % ≈ −40 dB). Off = unity — the
-     * system volume then does all the work.
+     * Direct volume control: the gain of the engine for a level (0 … 1). A squared taper, so the
+     * lower half of the slider has useful resolution (50 % ≈ −12 dB, 10 % ≈ −40 dB).
      */
-    fun directVolumeGain(s: SettingsState): Double {
-        if (!s.directVolume) return 1.0
-        val level = s.directVolumeLevel.toDouble().coerceIn(0.0, 1.0)
-        return level * level
-    }
+    fun gainForLevel(level: Float): Double = VolumeMath.gainForLevel(level)
 }

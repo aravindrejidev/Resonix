@@ -22,6 +22,33 @@ enum class OutputEngine(val label: String) {
     OPENSL("OpenSL ES"),
 }
 
+/**
+ * What the output stream is fed. Auto sends 32-bit float (Android's mixer works in float, so the
+ * signal arrives unchanged); the integer choices make the engine do the final rounding itself, with
+ * dither. [nativeValue] is AudioEngine::FormatPref.
+ */
+enum class OutputFormat(val label: String, val nativeValue: Int) {
+    AUTO("Auto", 0),
+    FLOAT32("Float", 1),
+    INT32("32", 4),
+    INT24("24", 3),
+    INT16("16", 2),
+}
+
+/** Dither applied when the engine rounds to 16 / 24 bit. The ordinal is what the native engine receives. */
+enum class DitherMode(val label: String) {
+    OFF("Off"),
+    AUTO("Auto"),
+    ALWAYS("Always"),
+}
+
+/** How carefully a sample-rate change is calculated. The ordinal is what the native engine receives. */
+enum class ResamplerQuality(val label: String) {
+    STANDARD("Standard"),
+    HIGH("High"),
+    MAXIMUM("Maximum"),
+}
+
 /** The ordinal is what the native engine receives (0 = Off, 1 = Track, 2 = Album). */
 enum class ReplayGainMode(val label: String) {
     OFF("Off"),
@@ -63,9 +90,17 @@ data class SettingsState(
     val exclusiveMode: Boolean = true,
     val bitPerfect: Boolean = true,
     val directVolume: Boolean = false,
+    /** While Direct volume control is on: park Android's own volume at maximum so only the engine attenuates. */
+    val dvcLockSystemVolume: Boolean = true,
     /** 0 … 1 — the level of Direct volume control (only used while that switch is on). */
     val directVolumeLevel: Float = 1f,
     val replayGain: ReplayGainMode = ReplayGainMode.OFF,
+    /** Output format, dither and resampler: how faithfully the signal leaves the engine. */
+    val outputFormat: OutputFormat = OutputFormat.AUTO,
+    val dither: DitherMode = DitherMode.AUTO,
+    val resamplerQuality: ResamplerQuality = ResamplerQuality.HIGH,
+    /** Android 14+: ask the system for a bit-perfect path to a USB DAC (bypasses its mixer, volume and effects). */
+    val usbBitPerfect: Boolean = true,
     val peakLimiter: Boolean = true,
 
     // Tools — equalizer (UI only for now)
@@ -129,9 +164,14 @@ class AppSettings private constructor(context: Context) {
             exclusiveMode = prefs.getBoolean(KEY_EXCLUSIVE, d.exclusiveMode),
             bitPerfect = prefs.getBoolean(KEY_BIT_PERFECT, d.bitPerfect),
             directVolume = prefs.getBoolean(KEY_DVC, d.directVolume),
+            dvcLockSystemVolume = prefs.getBoolean(KEY_DVC_LOCK, d.dvcLockSystemVolume),
             directVolumeLevel = prefs.getFloat(KEY_DVC_LEVEL, d.directVolumeLevel).coerceIn(0f, 1f),
             replayGain = parseEnum(prefs.getString(KEY_REPLAY_GAIN, null), d.replayGain),
             peakLimiter = prefs.getBoolean(KEY_LIMITER, d.peakLimiter),
+            outputFormat = parseEnum(prefs.getString(KEY_OUTPUT_FORMAT, null), d.outputFormat),
+            dither = parseEnum(prefs.getString(KEY_DITHER, null), d.dither),
+            resamplerQuality = parseEnum(prefs.getString(KEY_RESAMPLER, null), d.resamplerQuality),
+            usbBitPerfect = prefs.getBoolean(KEY_USB_BIT_PERFECT, d.usbBitPerfect),
             eqEnabled = prefs.getBoolean(KEY_EQ_ON, d.eqEnabled),
             eqPreset = prefs.getString(KEY_EQ_PRESET, d.eqPreset) ?: d.eqPreset,
             eqBands = bands,
@@ -158,9 +198,14 @@ class AppSettings private constructor(context: Context) {
             .putBoolean(KEY_EXCLUSIVE, s.exclusiveMode)
             .putBoolean(KEY_BIT_PERFECT, s.bitPerfect)
             .putBoolean(KEY_DVC, s.directVolume)
+            .putBoolean(KEY_DVC_LOCK, s.dvcLockSystemVolume)
             .putFloat(KEY_DVC_LEVEL, s.directVolumeLevel)
             .putString(KEY_REPLAY_GAIN, s.replayGain.name)
             .putBoolean(KEY_LIMITER, s.peakLimiter)
+            .putString(KEY_OUTPUT_FORMAT, s.outputFormat.name)
+            .putString(KEY_DITHER, s.dither.name)
+            .putString(KEY_RESAMPLER, s.resamplerQuality.name)
+            .putBoolean(KEY_USB_BIT_PERFECT, s.usbBitPerfect)
             .putBoolean(KEY_EQ_ON, s.eqEnabled)
             .putString(KEY_EQ_PRESET, s.eqPreset)
             .putString(KEY_EQ_BANDS, s.eqBands.joinToString(","))
@@ -195,6 +240,11 @@ class AppSettings private constructor(context: Context) {
         private const val KEY_EXCLUSIVE = "exclusive_mode"
         private const val KEY_BIT_PERFECT = "bit_perfect"
         private const val KEY_DVC = "direct_volume"
+        private const val KEY_DVC_LOCK = "dvc_lock_system_volume"
+        private const val KEY_OUTPUT_FORMAT = "output_format"
+        private const val KEY_DITHER = "dither"
+        private const val KEY_RESAMPLER = "resampler_quality"
+        private const val KEY_USB_BIT_PERFECT = "usb_bit_perfect"
         private const val KEY_DVC_LEVEL = "direct_volume_level"
         private const val KEY_REPLAY_GAIN = "replay_gain"
         private const val KEY_LIMITER = "peak_limiter"

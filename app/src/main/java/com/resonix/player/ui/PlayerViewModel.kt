@@ -17,6 +17,8 @@ import com.resonix.player.data.MediaStoreScanner
 import com.resonix.player.data.ScannedFolder
 import com.resonix.player.data.Track
 import com.resonix.player.audio.displayFormatName
+import com.resonix.player.playback.AudioRouteMonitor
+import com.resonix.player.playback.OutputRoute
 import com.resonix.player.playback.PlaybackController
 import com.resonix.player.playback.PlaybackSnapshot
 import com.resonix.player.playback.PlaybackStateBus
@@ -73,6 +75,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     /** UI preferences (theme, accent, sort order, Tools values …) — the same store the service reads. */
     val settings = AppSettings.get(application)
+
+    /** Where the music is going (AUX / USB DAC / Bluetooth …) and what that device can do. */
+    val outputRoute: StateFlow<OutputRoute> = AudioRouteMonitor.get(application).route
 
     /** The sleep timer runs inside the service, so it survives the screens going away. */
     val sleepTimer: StateFlow<SleepTimerState?> = SleepTimerBus.state

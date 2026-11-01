@@ -1,6 +1,7 @@
 package com.resonix.player.ui.screens
 
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.animation.Crossfade
 import androidx.activity.ComponentActivity
@@ -52,8 +53,13 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.resonix.player.data.ScannedFolder
+import com.resonix.player.playback.OutputRoute
+import com.resonix.player.playback.RouteKind
+import com.resonix.player.ui.DitherMode
 import com.resonix.player.ui.OutputEngine
+import com.resonix.player.ui.OutputFormat
 import com.resonix.player.ui.ReplayGainMode
+import com.resonix.player.ui.ResamplerQuality
 import com.resonix.player.ui.SettingsState
 import com.resonix.player.ui.neo.NeoCard
 import com.resonix.player.ui.neo.NeoDivider
@@ -105,6 +111,7 @@ fun SettingsScreen(
     isScanningDevice: Boolean,
     scrollState: ScrollState,
     bottomInset: Dp,
+    outputRoute: OutputRoute,
     page: SettingsPage?,
     onPageChange: (SettingsPage?) -> Unit,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
@@ -142,6 +149,7 @@ fun SettingsScreen(
         if (shown == null) {
             SettingsHome(
                 settings = settings,
+                outputRoute = outputRoute,
                 folderCount = folders.size,
                 versionName = versionName,
                 scrollState = scrollState,
@@ -176,7 +184,7 @@ fun SettingsScreen(
                         onScanDevice = onScanDevice,
                         onRescanFolder = onRescanFolder,
                     )
-                    SettingsPage.AUDIO -> AudioSection(settings, onChange)
+                    SettingsPage.AUDIO -> AudioSection(settings, outputRoute, onChange)
                     SettingsPage.ABOUT -> AboutSection(versionName)
                 }
             }
@@ -189,6 +197,7 @@ fun SettingsScreen(
 @Composable
 private fun SettingsHome(
     settings: SettingsState,
+    outputRoute: OutputRoute,
     folderCount: Int,
     versionName: String,
     scrollState: ScrollState,
@@ -206,9 +215,10 @@ private fun SettingsHome(
             else -> "$folderCount folders"
         }
         SettingsPage.AUDIO -> buildString {
-            append(settings.outputEngine.label)
+            append(outputRoute.kind.label)
             if (settings.exclusiveMode) append(" · Exclusive")
             if (settings.bitPerfect) append(" · Bit-perfect")
+            if (settings.directVolume) append(" · DVC")
         }
         SettingsPage.ABOUT -> "Version $versionName"
     }
@@ -448,8 +458,16 @@ private fun LibrarySection(
 @Composable
 private fun AudioSection(
     settings: SettingsState,
+    route: OutputRoute,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
 ) {
+    SettingsGroup("Connected output") {
+        SettingRow(
+            icon = if (route.kind == RouteKind.SPEAKER) NeoIcons.Phone else NeoIcons.Headphones,
+            title = route.title(),
+            subtitle = route.summary(settings.usbBitPerfect),
+        )
+    }
     SettingsGroup("Output") {
         ChoiceRow(
             icon = NeoIcons.Headphones,
@@ -463,7 +481,7 @@ private fun AudioSection(
         ToggleRow(
             icon = NeoIcons.Lock,
             title = "Exclusive mode",
-            subtitle = "Ask for sole access to the output stream (AAudio)",
+            subtitle = "Ask for sole access to the output stream (AAudio) — skips Android's mixer and its effects",
             checked = settings.exclusiveMode,
             onCheckedChange = { on -> onChange { it.copy(exclusiveMode = on) } },
         )
@@ -471,20 +489,64 @@ private fun AudioSection(
         ToggleRow(
             icon = NeoIcons.Bolt,
             title = "Bit-perfect output",
-            subtitle = "On: each song plays at its own sample rate. Off: everything at 48 kHz (from the next song)",
+            subtitle = "On: each song plays at its own sample rate, or the nearest one the output accepts. Off: everything at the device's rate",
             checked = settings.bitPerfect,
             onCheckedChange = { on -> onChange { it.copy(bitPerfect = on) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Storage,
+            title = "USB DAC bit-perfect (Android 14+)",
+            subtitle = "The system hands the engine's samples to the DAC unchanged — no resampling, no effects. Volume then comes from Direct volume control",
+            checked = settings.usbBitPerfect,
+            onCheckedChange = { on -> onChange { it.copy(usbBitPerfect = on) } },
+        )
+    }
+    SettingsGroup("Fidelity") {
+        ChoiceRow(
+            icon = NeoIcons.HiRes,
+            title = "Bits per sample",
+            subtitle = "What the engine delivers. Auto sends 32-bit float. 16 / 24 round the signal itself, with dither",
+            options = OutputFormat.entries.map { it.label },
+            selectedIndex = settings.outputFormat.ordinal,
+            onSelect = { index -> onChange { it.copy(outputFormat = OutputFormat.entries[index]) } },
+        )
+        SettingsDivider()
+        ChoiceRow(
+            icon = NeoIcons.Equalizer,
+            title = "Dither",
+            subtitle = "Noise that keeps quiet detail intact when rounding to 16 / 24 bit. Auto adds it only when the signal was changed",
+            options = DitherMode.entries.map { it.label },
+            selectedIndex = settings.dither.ordinal,
+            onSelect = { index -> onChange { it.copy(dither = DitherMode.entries[index]) } },
+        )
+        SettingsDivider()
+        ChoiceRow(
+            icon = NeoIcons.Tools,
+            title = "Resampler quality",
+            subtitle = "How carefully a sample-rate change is calculated, when one is needed",
+            options = ResamplerQuality.entries.map { it.label },
+            selectedIndex = settings.resamplerQuality.ordinal,
+            onSelect = { index -> onChange { it.copy(resamplerQuality = ResamplerQuality.entries[index]) } },
         )
     }
     SettingsGroup("Volume") {
         ToggleRow(
             icon = NeoIcons.Volume,
             title = "Direct volume control",
-            subtitle = "Set the level inside the engine, with a slider in the player",
+            subtitle = "The engine sets the volume (64-bit, dithered). The volume buttons control it",
             checked = settings.directVolume,
             onCheckedChange = { on -> onChange { it.copy(directVolume = on) } },
         )
         if (settings.directVolume) {
+            SettingsDivider()
+            ToggleRow(
+                icon = NeoIcons.Lock,
+                title = "Park system volume at maximum",
+                subtitle = "While music plays; put back afterwards at the same loudness. Off: DVC works on top of it",
+                checked = settings.dvcLockSystemVolume,
+                onCheckedChange = { on -> onChange { it.copy(dvcLockSystemVolume = on) } },
+            )
             SettingsDivider()
             SliderRow(
                 title = "Volume level",
@@ -512,6 +574,30 @@ private fun AudioSection(
             onCheckedChange = { on -> onChange { it.copy(peakLimiter = on) } },
         )
     }
+}
+
+/** "USB DAC · FiiO KA3", "AUX · Wired headphones", "Bluetooth · WH-1000XM5"… */
+private fun OutputRoute.title(): String =
+    if (name.isBlank() || kind == RouteKind.SPEAKER) kind.label else "${kind.label} · $name"
+
+/** One line on what Resonix can do with this output. */
+private fun OutputRoute.summary(usbBitPerfectOn: Boolean): String = when (kind) {
+    RouteKind.USB_DAC -> buildString {
+        if (maxSampleRateHz > 0) append("Up to ${maxSampleRateHz / 1000} kHz. ")
+        append(
+            when {
+                Build.VERSION.SDK_INT < 34 -> "Bit-perfect mode needs Android 14 — using the normal path."
+                bitPerfectFormats == 0 -> "This DAC does not offer the system's bit-perfect mode."
+                usbBitPerfectOn -> "Bit-perfect mode available, used for every song it fits."
+                else -> "Bit-perfect mode available but switched off."
+            }
+        )
+    }
+    RouteKind.WIRED -> "The phone's own DAC and amplifier. Exclusive mode and Bit-perfect give it the cleanest path."
+    RouteKind.BLUETOOTH -> "Sound quality is decided by the Bluetooth codec, not by the player."
+    RouteKind.HDMI -> "Digital output to a display or receiver."
+    RouteKind.SPEAKER -> "Built-in speaker."
+    RouteKind.OTHER -> "Android decides where the sound goes."
 }
 
 @Composable

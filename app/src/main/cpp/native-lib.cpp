@@ -283,4 +283,36 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeGetAlbumGainDb(
     return engine != nullptr ? engine->getAudioTrackInfo().albumGainDb : 0.0;
 }
 
+// --- Output plan / fidelity ----------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetOutputPlan(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint deviceId, jint forcedRateHz,
+        jint formatPref, jboolean bitPerfectMixer, jint nativeRateHz) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setOutputPlan(static_cast<int>(deviceId), static_cast<int>(forcedRateHz),
+                              static_cast<int>(formatPref), bitPerfectMixer == JNI_TRUE,
+                              static_cast<int>(nativeRateHz));
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetFidelity(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint ditherMode, jint resamplerQuality) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setFidelity(static_cast<int>(ditherMode), static_cast<int>(resamplerQuality));
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetNextStartPosition(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jlong positionMs) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setNextStartPosition(static_cast<int64_t>(positionMs));
+    }
+}
+
 }  // extern "C"

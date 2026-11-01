@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #define LOG_TAG "ResonixAudioEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -70,6 +71,7 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
     // what flushFromProducer() is safe against.
     mRingBuffer->flushFromProducer();
     mPendingSeekMs.store(-1, std::memory_order_relaxed);
+    const int64_t requestedStart = mNextStartMs.exchange(-1, std::memory_order_relaxed);
     mTrackFinishedEvent.store(false, std::memory_order_relaxed);
 
     {
@@ -81,9 +83,15 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
         mTrackInfo = TrackInfo{};
     }
 
-    // Bit-perfect: the stream follows the file's own sample rate. Otherwise the
-    // decoder converts everything to one fixed rate and the stream stays put.
-    mDecoder->setTargetSampleRate(mBitPerfect.load(std::memory_order_relaxed) ? 0 : kFixedOutputRate);
+    // The rate the decoder hands over at: whatever the output plan forces (the DAC's best match,
+    // the bit-perfect mixer's rate); otherwise the file's own rate (Bit-perfect on) or the
+    // device's native mixer rate (Bit-perfect off), so the stream stays put between songs.
+    const int forcedRate = mForcedRate.load(std::memory_order_relaxed);
+    const int targetRate = forcedRate > 0
+            ? forcedRate
+            : (mBitPerfect.load(std::memory_order_relaxed) ? 0 : mNativeRate.load(std::memory_order_relaxed));
+    mDecoder->setTargetSampleRate(targetRate);
+    mDecoder->setResamplerQuality(mResamplerQuality.load(std::memory_order_relaxed));
 
     TrackInfo info;
     if (!openDecoder(&info)) {
@@ -103,6 +111,8 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
         std::lock_guard<std::mutex> lock(mTrackInfoLock);
         mTrackInfo = info;
     }
+    mSourceBits.store(info.bitDepth > 0 ? info.bitDepth : 32, std::memory_order_relaxed);
+    mResampled.store(info.outputSampleRateHz != info.sampleRateHz, std::memory_order_relaxed);
     applyReplayGain();
 
     {
@@ -113,7 +123,8 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
                 mStream->getSampleRate() != info.outputSampleRateHz ||
                 mStream->getChannelCount() != info.channelCount ||
                 mStreamApiSetting != mOutputApi.load(std::memory_order_relaxed) ||
-                mStreamExclusiveSetting != mExclusive.load(std::memory_order_relaxed);
+                mStreamExclusiveSetting != mExclusive.load(std::memory_order_relaxed) ||
+                mStreamPlanGeneration != mPlanGeneration.load(std::memory_order_relaxed);
 
         if (needsReopen) {
             closeStreamLocked();
@@ -128,6 +139,12 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
     }
 
     mIsPlaying.store(true, std::memory_order_relaxed);
+    // Carrying on mid-song: the decode thread's first act is the seek, and until it has data the
+    // callback plays silence (and the position already reads the target).
+    const int64_t startAt = requestedStart;
+    if (startAt > 0) {
+        mPendingSeekMs.store(startAt, std::memory_order_relaxed);
+    }
     startDecodeThread();
 
     std::lock_guard<std::mutex> lock(mStreamLock);
@@ -325,9 +342,35 @@ void AudioEngine::setOutputConfig(int api, bool exclusive, bool bitPerfect) {
     }
 }
 
+void AudioEngine::setOutputPlan(int deviceId, int forcedRateHz, int formatPref, bool bitPerfectMixer,
+                                int nativeRateHz) {
+    deviceId = std::max(0, deviceId);
+    formatPref = std::max<int>(kFormatAuto, std::min<int>(formatPref, kPrefI32));
+    const bool streamShapeChanged = mDeviceId.load(std::memory_order_relaxed) != deviceId ||
+                                    mFormatPref.load(std::memory_order_relaxed) != formatPref ||
+                                    mBitPerfectMixer.load(std::memory_order_relaxed) != bitPerfectMixer;
+    mDeviceId.store(deviceId, std::memory_order_relaxed);
+    mFormatPref.store(formatPref, std::memory_order_relaxed);
+    mBitPerfectMixer.store(bitPerfectMixer, std::memory_order_relaxed);
+    mForcedRate.store(std::max(0, forcedRateHz), std::memory_order_relaxed);
+    mNativeRate.store(nativeRateHz > 0 ? nativeRateHz : kFixedOutputRate, std::memory_order_relaxed);
+    if (streamShapeChanged) {
+        mPlanGeneration.fetch_add(1, std::memory_order_relaxed);  // the next track reopens the stream
+    }
+}
+
+void AudioEngine::setFidelity(int ditherMode, int resamplerQuality) {
+    mDitherMode.store(std::max<int>(kDitherOff, std::min<int>(ditherMode, kDitherAlways)), std::memory_order_relaxed);
+    mResamplerQuality.store(std::max(0, std::min(resamplerQuality, 2)), std::memory_order_relaxed);
+}
+
 oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCount) {
     const int api = mOutputApi.load(std::memory_order_relaxed);
     const bool exclusive = mExclusive.load(std::memory_order_relaxed);
+    const int generation = mPlanGeneration.load(std::memory_order_relaxed);
+    const int deviceId = mDeviceId.load(std::memory_order_relaxed);
+    const int pref = mFormatPref.load(std::memory_order_relaxed);
+    const bool bitPerfectMixer = mBitPerfectMixer.load(std::memory_order_relaxed);
 
     // The user's pick first, then the other API: if a device cannot open a stream
     // through the chosen API at all, music beats obeying the setting.
@@ -340,44 +383,92 @@ oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCo
         second = oboe::AudioApi::Unspecified;
     }
 
-    oboe::Result result = tryOpenStream(sampleRate, channelCount, first, exclusive);
-    if (result != oboe::Result::OK) {
-        LOGW("Open via %s failed at %d Hz / %d ch: %s — retrying with %s",
-             oboe::convertToText(first), sampleRate, channelCount,
-             oboe::convertToText(result), oboe::convertToText(second));
-        result = tryOpenStream(sampleRate, channelCount, second, exclusive);
+    // The shape the output should take. "Auto" is 32-bit float: Android's mixer works in float, so
+    // that hands it the signal unchanged. A bit-perfect mixer / an explicit choice asks for an
+    // integer format; if the system can't open it, float is the safe fallback.
+    int wanted = kFormatFloat;
+    switch (pref) {
+        case kPrefI16: wanted = kFormatI16; break;
+        case kPrefI24: wanted = kFormatI24; break;
+        case kPrefI32: wanted = kFormatI32; break;
+        default: break;
     }
-    if (result == oboe::Result::OK) {
-        mStreamApiSetting = api;
-        mStreamExclusiveSetting = exclusive;
+
+    // Attempts, most faithful first. While a bit-perfect mixer is engaged the first attempts are
+    // "strict" (exact format, no conversion, no resampling anywhere); the last resort is a plain stream.
+    struct Attempt { int deviceId; int format; bool strict; };
+    Attempt attempts[6];
+    int count = 0;
+    attempts[count++] = {deviceId, wanted, bitPerfectMixer};
+    if (deviceId > 0) attempts[count++] = {0, wanted, bitPerfectMixer};  // the DAC vanished / refused
+    if (bitPerfectMixer) {
+        attempts[count++] = {deviceId, wanted, false};
+        attempts[count++] = {0, wanted, false};
+    }
+    if (wanted != kFormatFloat) attempts[count++] = {0, kFormatFloat, false};
+
+    oboe::Result result = oboe::Result::ErrorInternal;
+    for (int i = 0; i < count; i++) {
+        const Attempt &a = attempts[i];
+        for (oboe::AudioApi candidate : {first, second}) {
+            result = tryOpenStream(sampleRate, channelCount, candidate, exclusive, a.deviceId, a.format, a.strict);
+            if (result == oboe::Result::OK) {
+                mStreamApiSetting = api;
+                mStreamExclusiveSetting = exclusive;
+                mStreamPlanGeneration = generation;
+                return result;
+            }
+            LOGW("Open (api=%s, device=%d, format=%d, strict=%d) failed at %d Hz / %d ch: %s",
+                 oboe::convertToText(candidate), a.deviceId, a.format, a.strict ? 1 : 0, sampleRate,
+                 channelCount, oboe::convertToText(result));
+        }
     }
     return result;
 }
 
-oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount,
-                                        oboe::AudioApi audioApi, bool exclusive) {
+oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount, oboe::AudioApi audioApi,
+                                        bool exclusive, int deviceId, int format, bool strict) {
+    oboe::AudioFormat oboeFormat = oboe::AudioFormat::Float;
+    switch (format) {
+        case kFormatI16: oboeFormat = oboe::AudioFormat::I16; break;
+        case kFormatI24: oboeFormat = oboe::AudioFormat::I24; break;
+        case kFormatI32: oboeFormat = oboe::AudioFormat::I32; break;
+        default: break;
+    }
+
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
-            ->setPerformanceMode(exclusive ? oboe::PerformanceMode::LowLatency
-                                           : oboe::PerformanceMode::None)
-            ->setSharingMode(exclusive ? oboe::SharingMode::Exclusive : oboe::SharingMode::Shared)
-            ->setFormat(oboe::AudioFormat::Float)
-            ->setFormatConversionAllowed(true)
+            ->setFormat(oboeFormat)
             ->setSampleRate(sampleRate)
-            ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
             ->setChannelCount(channelCount)
             ->setUsage(oboe::Usage::Media)
             ->setContentType(oboe::ContentType::Music)
             ->setDataCallback(this)
             ->setErrorCallback(this);
+
+    if (strict) {
+        // Bit-perfect mixer: the bytes we write are the bytes that reach the DAC. No conversion
+        // by Oboe, no sample-rate conversion, the shared (non-MMAP) path the mixer is attached to.
+        builder.setFormatConversionAllowed(false)
+                ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::None)
+                ->setPerformanceMode(oboe::PerformanceMode::None)
+                ->setSharingMode(oboe::SharingMode::Shared);
+    } else {
+        builder.setFormatConversionAllowed(true)
+                ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
+                ->setPerformanceMode(exclusive ? oboe::PerformanceMode::LowLatency
+                                               : oboe::PerformanceMode::None)
+                ->setSharingMode(exclusive ? oboe::SharingMode::Exclusive : oboe::SharingMode::Shared);
+    }
     if (audioApi != oboe::AudioApi::Unspecified) {
         builder.setAudioApi(audioApi);
+    }
+    if (deviceId > 0) {
+        builder.setDeviceId(deviceId);
     }
 
     oboe::Result result = builder.openStream(mStream);
     if (result != oboe::Result::OK) {
-        LOGE("Failed to open stream (api=%s) at %d Hz / %d ch: %s",
-             oboe::convertToText(audioApi), sampleRate, channelCount, oboe::convertToText(result));
         mStream.reset();
         return result;
     }
@@ -386,12 +477,22 @@ oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount
     // directly determines bit-perfect-ness. The requested sample rate can also,
     // in rare cases, not be granted exactly; the decoder already delivers exactly
     // what we asked for, so a mismatch means the output path resampled, not us.
-    LOGI("Stream opened: api=%s, sharingMode=%s, requested %dHz/%dch, granted %dHz/%dch/%s",
+    LOGI("Stream opened: api=%s, sharingMode=%s, device=%d, requested %dHz/%dch/%s, granted %dHz/%dch/%s",
          oboe::convertToText(mStream->getAudioApi()),
          oboe::convertToText(mStream->getSharingMode()),
-         sampleRate, channelCount,
+         mStream->getDeviceId(), sampleRate, channelCount, oboe::convertToText(oboeFormat),
          mStream->getSampleRate(), mStream->getChannelCount(),
          oboe::convertToText(mStream->getFormat()));
+
+    // What the audio callback must write: whatever the stream says it wants.
+    int activeFormat = kFormatFloat;
+    switch (mStream->getFormat()) {
+        case oboe::AudioFormat::I16: activeFormat = kFormatI16; break;
+        case oboe::AudioFormat::I24: activeFormat = kFormatI24; break;
+        case oboe::AudioFormat::I32: activeFormat = kFormatI32; break;
+        default: break;
+    }
+    mActiveFormat.store(activeFormat, std::memory_order_relaxed);
 
     size_t scratchSize = kMaxScratchFrames * static_cast<size_t>(mStream->getChannelCount());
     if (mReadScratch.size() < scratchSize) {
@@ -399,6 +500,16 @@ oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount
     }
 
     mDsp.configure(static_cast<double>(mStream->getSampleRate()), mStream->getChannelCount());
+
+    // Buffer: start a little roomier than the minimum (music has no use for the lowest latency)
+    // and let tuneBuffer() grow it if the device ever underruns.
+    mBurstFrames = mStream->getFramesPerBurst();
+    mCapacityFrames = mStream->getBufferCapacityInFrames();
+    mLastXRunCount = 0;
+    mCallbacksSinceCheck = 0;
+    if (mBurstFrames > 0 && mCapacityFrames > 0) {
+        mStream->setBufferSizeInFrames(std::min(mCapacityFrames, mBurstFrames * 3));
+    }
 
     std::string description;
     if (mStream->getAudioApi() == oboe::AudioApi::AAudio) {
@@ -408,6 +519,13 @@ oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount
         description = "OpenSL ES";
     }
     description += " · " + describeSampleRate(mStream->getSampleRate());
+    switch (activeFormat) {
+        case kFormatI16: description += " · 16-bit"; break;
+        case kFormatI24: description += " · 24-bit"; break;
+        case kFormatI32: description += " · 32-bit"; break;
+        default: description += " · float"; break;
+    }
+    if (strict) description += " · Bit-perfect";
     {
         std::lock_guard<std::mutex> lock(mTrackInfoLock);
         mOutputDescription = description;
@@ -475,7 +593,7 @@ void AudioEngine::decodeThreadLoop() {
     }
 }
 
-int32_t AudioEngine::processIntoFloatBuffer(float *out, int32_t maxFrames, int32_t channelCount) {
+int32_t AudioEngine::renderBlock(void *out, int32_t maxFrames, int32_t channelCount, int format) {
     if (channelCount <= 0 || maxFrames <= 0) {
         return 0;
     }
@@ -494,35 +612,66 @@ int32_t AudioEngine::processIntoFloatBuffer(float *out, int32_t maxFrames, int32
     size_t framesGot = gotSamples / static_cast<size_t>(channelCount);
     gotSamples = framesGot * static_cast<size_t>(channelCount);
 
-    // Double-precision DSP chain (Dsp.h), still ahead of the float32 cast.
+    // Double-precision DSP chain (Dsp.h), still ahead of the final quantiser.
     mDsp.process(mReadScratch.data(), framesGot, channelCount);
-    for (size_t i = 0; i < gotSamples; i++) {
-        out[i] = static_cast<float>(mReadScratch[i]);
+
+    // Dither only where it helps: into a 16- or 24-bit output, and only when the samples are not
+    // already exactly on that output's grid. An untouched 16-bit file played at its own rate to a
+    // 16-bit stream is bit-for-bit what the file contains — adding noise there would be a loss.
+    bool dither = false;
+    if (format == kFormatI16 || format == kFormatI24) {
+        const int mode = mDitherMode.load(std::memory_order_relaxed);
+        const bool onGrid = mDsp.lastBlockWasNeutral() &&
+                            !mResampled.load(std::memory_order_relaxed) &&
+                            mSourceBits.load(std::memory_order_relaxed) <= bitsOfFormat(format);
+        dither = (mode == kDitherAlways) || (mode == kDitherAuto && !onGrid);
     }
+    mQuantizer.convert(mReadScratch.data(), out, gotSamples, format, dither);
 
     // Underrun (decoder fell behind) or nothing queued yet: silence-fill
     // rather than leaving stale/garbage data in the output buffer.
-    for (size_t i = gotSamples; i < samplesNeeded; i++) {
-        out[i] = 0.0f;
+    const size_t bytes = bytesPerSample(format);
+    if (samplesNeeded > gotSamples) {
+        std::memset(static_cast<uint8_t *>(out) + gotSamples * bytes, 0, (samplesNeeded - gotSamples) * bytes);
     }
 
     return framesToProcess;
 }
 
+void AudioEngine::tuneBuffer(oboe::AudioStream *stream) {
+    // Cheap enough for the callback, but there is no point asking every few milliseconds.
+    if (++mCallbacksSinceCheck < 32 || mBurstFrames <= 0) {
+        return;
+    }
+    mCallbacksSinceCheck = 0;
+    oboe::ResultWithValue<int32_t> xruns = stream->getXRunCount();
+    if (xruns.error() != oboe::Result::OK || xruns.value() <= mLastXRunCount) {
+        return;
+    }
+    mLastXRunCount = xruns.value();
+    const int32_t current = stream->getBufferSizeInFrames();
+    const int32_t grown = std::min(mCapacityFrames, current + mBurstFrames);
+    if (grown > current) {
+        stream->setBufferSizeInFrames(grown);
+    }
+}
+
 oboe::DataCallbackResult AudioEngine::onAudioReady(
         oboe::AudioStream *stream, void *audioData, int32_t numFrames) {
-    auto *out = static_cast<float *>(audioData);
-    int32_t channels = stream->getChannelCount();
+    const int32_t channels = stream->getChannelCount();
+    const int format = mActiveFormat.load(std::memory_order_relaxed);
 
-    int32_t framesProcessed = processIntoFloatBuffer(out, numFrames, channels);
-    // Defensive: if Oboe ever asks for more frames than processIntoFloatBuffer
-    // could provide (bounded by mReadScratch's fixed size), silence the
-    // tail rather than leaving it untouched.
-    for (int32_t f = framesProcessed; f < numFrames; f++) {
-        for (int32_t c = 0; c < channels; c++) {
-            out[static_cast<size_t>(f) * channels + c] = 0.0f;
-        }
+    int32_t framesProcessed = renderBlock(audioData, numFrames, channels, format);
+    // Defensive: if Oboe ever asks for more frames than renderBlock could provide
+    // (bounded by mReadScratch's fixed size), silence the tail rather than
+    // leaving it untouched.
+    if (framesProcessed < numFrames && channels > 0) {
+        const size_t bytes = bytesPerSample(format);
+        std::memset(static_cast<uint8_t *>(audioData) + static_cast<size_t>(framesProcessed) * channels * bytes, 0,
+                    static_cast<size_t>(numFrames - framesProcessed) * channels * bytes);
     }
+
+    tuneBuffer(stream);
 
     // "Decoder at end-of-stream + nothing queued" means the track is over — unless a
     // new track is being loaded, or a seek (which rewinds the decoder) is on its way.
@@ -539,7 +688,7 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
 }
 
 int32_t AudioEngine::pullProcessedFrames(float *out, int32_t maxFrames, int32_t channelCount) {
-    int32_t framesWritten = processIntoFloatBuffer(out, maxFrames, channelCount);
+    int32_t framesWritten = renderBlock(out, maxFrames, channelCount, kFormatFloat);
 
     bool trackDone = mPendingSeekMs.load(std::memory_order_relaxed) < 0 &&
                      mDecoder->isEndOfStream() && mRingBuffer->availableToRead() == 0;

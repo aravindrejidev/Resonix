@@ -86,6 +86,12 @@ public:
     // the next open()/openFd().
     void setTargetSampleRate(int hz) { mTargetSampleRate = hz > 0 ? hz : 0; }
 
+    // How carefully libswresample converts when it has to change the sample rate:
+    // 0 = Standard (FFmpeg's defaults), 1 = High, 2 = Maximum (longer filter, steeper cut-off,
+    // higher arithmetic precision). Has no effect while the output rate equals the file's.
+    // Takes effect on the next open()/openFd().
+    void setResamplerQuality(int quality) { mResamplerQuality = quality < 0 ? 0 : (quality > 2 ? 2 : quality); }
+
     // Asks a decodeInto() that is currently waiting for ring-buffer space
     // to give up, so the decode thread can be joined promptly (pause with a
     // full buffer + a new track request used to be able to hang there).
@@ -137,6 +143,7 @@ private:
 
     int mStreamIndex = -1;
     int mTargetSampleRate = 0;
+    int mResamplerQuality = 1;
     int mOutputSampleRate = 0;
     int mOutputChannelCount = 0;
 

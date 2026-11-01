@@ -1,5 +1,9 @@
 #include "AudioDecoder.h"
 
+extern "C" {
+#include <libavutil/opt.h>
+}
+
 #include <android/log.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -385,6 +389,28 @@ bool AudioDecoder::setupResampler() {
     if (ret < 0 || mSwrCtx == nullptr) {
         LOGE("swr_alloc_set_opts2 failed");
         return false;
+    }
+
+    // Only matters when the rate really changes; harmless otherwise.
+    if (mOutputSampleRate != mCodecCtx->sample_rate) {
+        struct Preset {
+            int filterSize;
+            int phaseShift;
+            double cutoff;
+            double precision;
+            double kaiserBeta;
+        };
+        static const Preset kPresets[3] = {
+                {32, 10, 0.97, 20.0, 9.0},    // Standard: FFmpeg's own defaults
+                {64, 12, 0.98, 28.0, 11.0},   // High
+                {128, 14, 0.99, 33.0, 14.0},  // Maximum
+        };
+        const Preset &p = kPresets[mResamplerQuality];
+        av_opt_set_int(mSwrCtx, "filter_size", p.filterSize, 0);
+        av_opt_set_int(mSwrCtx, "phase_shift", p.phaseShift, 0);
+        av_opt_set_double(mSwrCtx, "cutoff", p.cutoff, 0);
+        av_opt_set_double(mSwrCtx, "precision", p.precision, 0);
+        av_opt_set_double(mSwrCtx, "kaiser_beta", p.kaiserBeta, 0);
     }
 
     if (swr_init(mSwrCtx) < 0) {

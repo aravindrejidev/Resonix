@@ -60,6 +60,11 @@ public:
 
     // --- audio thread -----------------------------------------------------------
 
+    // True if the last process() call left every sample exactly as it came in: unity gain, no bass
+    // boost, untouched stereo image, centred balance. Only meaningful on the audio thread. The
+    // output stage uses it to know when dither must NOT be added (a bit-perfect signal stays so).
+    bool lastBlockWasNeutral() const { return mLastNeutral; }
+
     // Processes [frames] interleaved frames in place.
     void process(double *data, size_t frames, int channels) {
         if (frames == 0 || channels <= 0) {
@@ -155,6 +160,18 @@ public:
                 frame[c] = clampd(frame[c], -1.0, 1.0);
             }
         }
+
+        mLastNeutral = !doBass && !doWidth && std::fabs(targetGain - 1.0) < 1e-9 &&
+                       std::fabs(mGain - 1.0) < 1e-9 && std::fabs(mBalL - 1.0) < 1e-9 &&
+                       std::fabs(mBalR - 1.0) < 1e-9;
+
+        // Filter memory that has decayed to the denormal range makes some CPUs crawl; flush it.
+        if (doBass) {
+            for (int c = 0; c < kMaxChannels; c++) {
+                if (std::fabs(mBassFilter[c].z1) < 1e-30) mBassFilter[c].z1 = 0.0;
+                if (std::fabs(mBassFilter[c].z2) < 1e-30) mBassFilter[c].z2 = 0.0;
+            }
+        }
     }
 
 private:
@@ -237,6 +254,7 @@ private:
     double mStateRate = 0.0;
     double mSmoothCoeff = 0.002;
     bool mInitialised = false;
+    bool mLastNeutral = true;
     double mGain = 1.0;
     double mBalL = 1.0;
     double mBalR = 1.0;

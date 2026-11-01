@@ -120,6 +120,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     val scanningFolderUri by viewModel.scanningFolderUri.collectAsState()
     val nowPlaying by viewModel.uiState.collectAsState()
     val sleepTimer by viewModel.sleepTimer.collectAsState()
+    val outputRoute by viewModel.outputRoute.collectAsState()
 
     // ── folder picker + permission plumbing ──
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
@@ -256,6 +257,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     isScanningDevice = isScanningDevice,
                     scrollState = settingsScroll,
                     bottomInset = bottomInset,
+                    outputRoute = outputRoute,
                     page = settingsPage,
                     onPageChange = { settingsPage = it },
                     onChange = { transform -> viewModel.settings.update(transform) },

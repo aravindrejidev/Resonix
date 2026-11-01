@@ -56,7 +56,12 @@ data class NowPlaying(
 class PlaybackQueueManager(
     context: Context,
     private val engine: NativeAudioEngine,
-    private val trackDao: TrackDao
+    private val trackDao: TrackDao,
+    /**
+     * Called on the loader thread right before a song is handed to the engine — the place to decide
+     * where and how it should leave the app (output device, sample rate, bit-perfect mode).
+     */
+    private val beforePlay: (Track) -> Unit = {},
 ) {
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -74,6 +79,10 @@ class PlaybackQueueManager(
 
     /** Pause was pressed while a song was still loading; applied the moment it starts. */
     private var pauseWhenLoaded: Boolean = false
+
+    /** Where the song being (re)loaded should carry on from; -1 = from the start. */
+    @Volatile
+    private var resumeAtMs: Long = -1L
 
     /** Bumped for every load request; only the newest request's result is applied. */
     @Volatile
@@ -164,6 +173,16 @@ class PlaybackQueueManager(
         }
     }
 
+    /**
+     * Loads the current song again and carries on from [positionMs] — used when the output device
+     * changed (a DAC was plugged in) so the rest of the song goes out through the new route.
+     */
+    fun reloadCurrent(positionMs: Long, startPaused: Boolean) {
+        if (queue.getOrNull(currentIndex) == null) return
+        playCurrent(resumeAt = positionMs.coerceAtLeast(0L))
+        if (startPaused) pauseWhenLoaded = true
+    }
+
     /** Pauses; if a song is still loading it will start paused. */
     fun pause() {
         if (_isLoading.value) pauseWhenLoaded = true
@@ -203,9 +222,10 @@ class PlaybackQueueManager(
         return if (ascending) tracks.sortedWith(comparator) else tracks.sortedWith(comparator.reversed())
     }
 
-    private fun playCurrent() {
+    private fun playCurrent(resumeAt: Long = -1L) {
         val index = currentIndex
         val track = queue.getOrNull(index) ?: return
+        resumeAtMs = resumeAt  // set before the load starts (the loader thread reads it); a later request overrides it
         val token = ++loadToken
         queueFinished = false
         pauseWhenLoaded = false  // a fresh request means "play this"; pause() may set it again afterwards
@@ -227,6 +247,13 @@ class PlaybackQueueManager(
         return try {
             val pfd = appContext.contentResolver.openFileDescriptor(track.contentUri.toUri(), "r")
                 ?: return LoadOutcome.Failed("the file could not be opened")
+            try {
+                beforePlay(track)
+            } catch (e: Exception) {
+                Log.w(TAG, "Planning the output for ${track.title} failed", e)
+            }
+            val resume = resumeAtMs
+            if (resume > 0L) engine.setNextStartPosition(resume)
             val started = pfd.use { engine.playTrackFd(it.fd) }  // engine dup()s the fd
             if (started) {
                 LoadOutcome.Playing(engine.getAudioTrackInfo())
@@ -251,6 +278,7 @@ class PlaybackQueueManager(
     private fun onLoaded(token: Int, index: Int, track: Track, outcome: LoadOutcome) {
         if (released || token != loadToken) return  // a newer request has taken over
         _isLoading.value = false
+        resumeAtMs = -1L
         when (outcome) {
             is LoadOutcome.Playing -> {
                 consecutiveFailures = 0

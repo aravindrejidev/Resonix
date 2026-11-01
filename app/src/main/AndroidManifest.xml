@@ -17,6 +17,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Android 14 bit-perfect mixer for USB DACs (AudioManager.setPreferredMixerAttributes). -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <!-- Declares interest in low-latency / pro audio hardware without excluding
          devices that lack it (required="false"). Relevant to the Oboe/AAudio

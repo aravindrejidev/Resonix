@@ -17,7 +17,9 @@ import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -27,6 +29,7 @@ import com.resonix.player.MainActivity
 import com.resonix.player.R
 import com.resonix.player.audio.NativeAudioEngine
 import com.resonix.player.data.AppDatabase
+import com.resonix.player.data.Track
 import com.resonix.player.ui.AlbumArtLoader
 import com.resonix.player.ui.AppSettings
 import com.resonix.player.ui.SettingsState
@@ -39,6 +42,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -77,9 +81,29 @@ class PlaybackService : Service() {
         Thread(runnable, "resonix-engine-settings")
     }
 
-    /** Direct-volume level from Settings, and the temporary dip while another app talks. */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private lateinit var routeMonitor: AudioRouteMonitor
+    private lateinit var directVolume: DirectVolume
+    private var usbBitPerfect: UsbBitPerfect? = null  // Android 14+ only
+
+    /** Direct-volume gain from Settings, and the temporary dip while another app talks. */
     private var dvcGain = 1.0
     private var duckFactor = 1.0
+
+    // Direct volume control state machine (see reconcileDirectVolume).
+    @Volatile
+    private var bitPerfectActive = false     // the USB bit-perfect mixer is engaged for the current song
+    private var dvcEngaged = false
+    private var systemFolded = false         // Android's volume has been folded into the engine level
+    private var foldedForLock = false        // ... because DVC parks the system volume (not just bit-perfect)
+    private var preFoldLevel: Float? = null
+    private var parkPending = false
+    private var dvcSequence = 0
+
+    /** What the current song was planned for; a change of these re-plans it on the spot. */
+    private var lastRouteKey: String? = null
+    private var lastPlanSettingsKey: String? = null
 
     private var isForeground = false
     private var destroyed = false
@@ -108,7 +132,10 @@ class PlaybackService : Service() {
 
         settings = AppSettings.get(this)
         engine = NativeAudioEngine()
-        queueManager = PlaybackQueueManager(this, engine, AppDatabase.getInstance(this).trackDao())
+        routeMonitor = AudioRouteMonitor.get(this)
+        queueManager = PlaybackQueueManager(
+            this, engine, AppDatabase.getInstance(this).trackDao(), beforePlay = ::planOutputFor
+        )
         audioFocusManager = AudioFocusManager(
             context = this,
             isPlaying = ::isActuallyPlaying,
@@ -121,6 +148,10 @@ class PlaybackService : Service() {
         )
 
         createSession()
+        directVolume = DirectVolume(this, session)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            usbBitPerfect = UsbBitPerfect(routeMonitor, getSystemService(AudioManager::class.java))
+        }
         ContextCompat.registerReceiver(
             this,
             noisyReceiver,
@@ -132,9 +163,17 @@ class PlaybackService : Service() {
         // first song already opens with the saved Output / Exclusive / Bit-perfect choices.
         val initialSettings = settings.state.value
         EngineSettings.apply(engine, initialSettings)
-        dvcGain = EngineSettings.directVolumeGain(initialSettings)
-        applyMasterGain()
+        lastPlanSettingsKey = planSettingsKey(initialSettings)
+        routeMonitor.refresh()
+        val startRoute = routeMonitor.route.value
+        lastRouteKey = routeKey(startRoute)
+        if (!initialSettings.directVolume) {
+            directVolume.restoreLeftover()      // a crash while parked must not leave the volume at maximum
+        }
+        directVolume.fixStale(startRoute.deviceType)
+        reconcileDirectVolume()
         serviceScope.launch { settings.state.collect { applySettings(it) } }
+        serviceScope.launch { routeMonitor.route.collect { onRouteChanged(it) } }
         serviceScope.launch { queueManager.nowPlaying.collect { onTrackChanged(it) } }
         serviceScope.launch { queueManager.isLoading.collect { refreshAll() } }
         serviceScope.launch { runTicker() }
@@ -165,6 +204,10 @@ class PlaybackService : Service() {
         destroyed = true
         PlaybackController.detach(this)
         serviceScope.cancel()
+        // Give Android's volume back (at the loudness it was playing at) and the DAC to the normal mixer.
+        directVolume.removeRemote()
+        directVolume.unpark(settings.state.value.directVolumeLevel, routeMonitor.route.value.deviceType)
+        usbBitPerfect?.release()
         try {
             unregisterReceiver(noisyReceiver)
         } catch (_: IllegalArgumentException) {
@@ -281,8 +324,7 @@ class PlaybackService : Service() {
     // --- Settings -> engine ---------------------------------------------------------
 
     private fun applySettings(state: SettingsState) {
-        dvcGain = EngineSettings.directVolumeGain(state)
-        applyMasterGain()
+        reconcileDirectVolume()
         try {
             engineSettingsExecutor.execute {
                 try {
@@ -293,6 +335,227 @@ class PlaybackService : Service() {
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             // The service is shutting down.
+        }
+        // Some choices change how the *current* song has to leave the app: re-plan it right now
+        // instead of making the user wait for the next one.
+        val key = planSettingsKey(state)
+        if (key != lastPlanSettingsKey) {
+            lastPlanSettingsKey = key
+            replanCurrentSong()
+        }
+    }
+
+    private fun planSettingsKey(s: SettingsState): String =
+        "${s.outputFormat}/${s.usbBitPerfect}/${s.bitPerfect}/${s.resamplerQuality}"
+
+    private fun routeKey(route: OutputRoute): String = "${route.kind}/${route.deviceId}"
+
+    /** Loads the current song again from where it is, so it goes through a freshly made output plan. */
+    private fun replanCurrentSong() {
+        if (queueManager.nowPlaying.value == null || queueManager.isLoading.value) return
+        queueManager.reloadCurrent(engine.getCurrentPositionMs(), startPaused = !engine.isPlaying())
+    }
+
+    private fun onRouteChanged(route: OutputRoute) {
+        if (destroyed) return
+        val key = routeKey(route)
+        val previous = lastRouteKey
+        lastRouteKey = key
+        refreshAll()
+        if (previous == null || previous == key) return
+
+        // The volume we parked belonged to the device that just went away.
+        directVolume.forget(deviceTypeOfKey(previous))
+        if (!settings.state.value.directVolume) directVolume.fixStale(route.deviceType)
+        reconcileDirectVolume()
+        updateSystemVolumePark()
+
+        // A DAC arrived or left: the rest of the song should go out through the new route.
+        val usbInvolved = route.kind == RouteKind.USB_DAC || previous.startsWith(RouteKind.USB_DAC.name)
+        if (usbInvolved) replanCurrentSong()
+    }
+
+    /** The AudioDeviceInfo type recorded for a route key — enough to tell kinds of device apart. */
+    private fun deviceTypeOfKey(key: String): Int = when (key.substringBefore('/')) {
+        RouteKind.USB_DAC.name -> android.media.AudioDeviceInfo.TYPE_USB_DEVICE
+        RouteKind.WIRED.name -> android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+        RouteKind.BLUETOOTH.name -> android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+        RouteKind.HDMI.name -> android.media.AudioDeviceInfo.TYPE_HDMI
+        else -> android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+    }
+
+    // --- Where and how each song leaves the app -------------------------------------------
+
+    /**
+     * Runs on the loader thread right before a song is handed to the engine: looks at the output
+     * route and the user's fidelity choices and tells the engine which device, sample rate and
+     * sample format to use — including switching on Android 14's bit-perfect mixer for USB DACs.
+     */
+    private fun planOutputFor(track: Track) {
+        val s = settings.state.value
+        val route = routeMonitor.route.value
+        val nativeRate = routeMonitor.nativeSampleRateHz
+        val usb = route.kind == RouteKind.USB_DAC
+
+        var forcedRate = 0
+        var formatPref = s.outputFormat.nativeValue
+        var bitPerfectMixer = false
+
+        val bitPerfect = usbBitPerfect
+        if (usb && s.usbBitPerfect && bitPerfect != null && track.sampleRateHz > 0) {
+            val plan = try {
+                bitPerfect.prepare(route.deviceId, track.sampleRateHz, track.bitDepth, 2)
+            } catch (e: Exception) {
+                Log.w(TAG, "Bit-perfect planning failed", e)
+                null
+            }
+            if (plan != null) {
+                // Android's volume disappears the moment the mixer goes bit-perfect: move it into
+                // the engine first (on the main thread; wait for it) so nothing gets louder.
+                bitPerfectActive = true
+                runOnMainAndWait(800) { reconcileDirectVolume() }
+                if (bitPerfect.commit(plan)) {
+                    bitPerfectMixer = true
+                    forcedRate = plan.sampleRateHz
+                    formatPref = plan.formatPref
+                } else {
+                    bitPerfectActive = false
+                    runOnMainAndWait(800) { reconcileDirectVolume() }
+                }
+            }
+        }
+        if (!bitPerfectMixer) {
+            bitPerfect?.release()
+            if (bitPerfectActive) {
+                bitPerfectActive = false
+                runOnMainAndWait(800) { reconcileDirectVolume() }
+            }
+            forcedRate = OutputPlanner.chooseRate(track.sampleRateHz, route.sampleRates, nativeRate, s.bitPerfect)
+        }
+
+        engine.setOutputPlan(
+            deviceId = if (bitPerfectMixer) route.deviceId else 0,
+            forcedRateHz = forcedRate,
+            formatPref = formatPref,
+            bitPerfectMixer = bitPerfectMixer,
+            nativeRateHz = nativeRate,
+        )
+    }
+
+    private fun runOnMainAndWait(timeoutMs: Long, block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+            return
+        }
+        val done = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                if (!destroyed) block()
+            } finally {
+                done.countDown()
+            }
+        }
+        done.await(timeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    // --- Direct volume control ---------------------------------------------------------
+
+    /**
+     * Brings the volume machinery in line with the settings and the output:
+     *
+     *  * DVC is wanted when the user switched it on *or* the USB bit-perfect mixer is engaged (that
+     *    mixer ignores Android's volume, so something has to control the level).
+     *  * When it becomes wanted and Android's volume is about to stop mattering (DVC parks it at
+     *    maximum, or the bit-perfect mixer bypasses it), the system attenuation is folded into the
+     *    engine level once — so switching DVC on never changes how loud the music is.
+     *  * The engine gain is `level²`; the volume keys are routed to the level; the system volume
+     *    is parked at maximum only while music plays ([updateSystemVolumePark]).
+     *  * When it stops being wanted, the system volume gets the step of equal loudness back first
+     *    and the engine returns to unity a moment later.
+     */
+    private fun reconcileDirectVolume() {
+        if (destroyed) return
+        val s = settings.state.value
+        val type = routeMonitor.route.value.deviceType
+        val lockWanted = s.directVolume && s.dvcLockSystemVolume
+        val wanted = s.directVolume || bitPerfectActive
+        val foldWanted = lockWanted || bitPerfectActive
+        var level = s.directVolumeLevel
+
+        if (wanted) {
+            dvcEngaged = true
+            dvcSequence++
+            if (foldWanted && !systemFolded) {
+                preFoldLevel = level
+                foldedForLock = lockWanted
+                level = directVolume.fold(level, type)
+                systemFolded = true
+                if (level != s.directVolumeLevel) settings.update { it.copy(directVolumeLevel = level) }
+            } else if (!foldWanted && systemFolded) {
+                level = unfoldSystemVolume(level, type, keepUserLevel = !foldedForLock)
+                settings.update { it.copy(directVolumeLevel = level) }
+            }
+            dvcGain = VolumeMath.gainForLevel(level)
+            applyMasterGain()
+            directVolume.installRemote(level) { newLevel ->
+                settings.update { it.copy(directVolumeLevel = newLevel) }
+            }
+            directVolume.updateRemote(level)
+            updateSystemVolumePark()
+        } else {
+            val wasEngaged = dvcEngaged
+            dvcEngaged = false
+            directVolume.removeRemote()
+            if (systemFolded) {
+                level = unfoldSystemVolume(level, type, keepUserLevel = !foldedForLock)
+                settings.update { it.copy(directVolumeLevel = level) }
+            }
+            val sequence = ++dvcSequence
+            if (wasEngaged) {
+                // The system volume was just put back at equal loudness; only then let the engine
+                // go to unity, so there is no instant in which both are open.
+                serviceScope.launch {
+                    delay(DVC_HANDOVER_MS)
+                    if (sequence == dvcSequence && !dvcEngaged) {
+                        dvcGain = 1.0
+                        applyMasterGain()
+                    }
+                }
+            } else {
+                dvcGain = 1.0
+                applyMasterGain()
+            }
+        }
+    }
+
+    /** Hands Android's volume back at the loudness the engine level had; returns the level to store. */
+    private fun unfoldSystemVolume(level: Float, deviceType: Int, keepUserLevel: Boolean): Float {
+        directVolume.unpark(level, deviceType)
+        systemFolded = false
+        val restored = if (keepUserLevel) (preFoldLevel ?: 1f) else 1f
+        preFoldLevel = null
+        foldedForLock = false
+        return restored
+    }
+
+    /** Android's music volume sits at maximum exactly while music plays (and DVC owns the volume). */
+    private fun updateSystemVolumePark() {
+        if (destroyed || !::directVolume.isInitialized) return
+        val s = settings.state.value
+        val type = routeMonitor.route.value.deviceType
+        val shouldPark = s.directVolume && s.dvcLockSystemVolume && systemFolded && isActuallyPlaying()
+        if (shouldPark && !directVolume.parked && !parkPending) {
+            parkPending = true
+            // The engine already compensates; let the first audio go out before the system volume opens up.
+            serviceScope.launch {
+                delay(PARK_DELAY_MS)
+                parkPending = false
+                if (!destroyed && isActuallyPlaying() && settings.state.value.directVolume && systemFolded) {
+                    directVolume.park(settings.state.value.directVolumeLevel, type)
+                }
+            }
+        } else if (!shouldPark && directVolume.parked) {
+            directVolume.unpark(s.directVolumeLevel, type)
         }
     }
 
@@ -341,6 +604,7 @@ class PlaybackService : Service() {
     private fun refreshAll() {
         if (destroyed) return
         updateWakeLock()
+        updateSystemVolumePark()
         refreshSessionState()
         refreshNotification()
         publishSnapshot()
@@ -362,9 +626,16 @@ class PlaybackService : Service() {
                 isPlaying = engine.isPlaying() || loading,
                 positionMs = position,
                 durationMs = duration,
-                outputInfo = engine.getOutputDescription(),
+                outputInfo = outputInfoText(),
             )
         )
+    }
+
+    /** "USB DAC · AAudio · Shared · 96 kHz · 24-bit · Bit-perfect" */
+    private fun outputInfoText(): String {
+        val engineText = engine.getOutputDescription()
+        if (engineText.isBlank()) return ""
+        return "${routeMonitor.route.value.kind.label} · $engineText"
     }
 
     private fun onTrackChanged(playing: NowPlaying?) {
@@ -596,6 +867,8 @@ class PlaybackService : Service() {
         private const val IDLE_STOP_TICKS = 150  // 15 s
         private const val RESTART_THRESHOLD_MS = 3_000L
         private const val DUCK_GAIN = 0.2
+        private const val PARK_DELAY_MS = 40L
+        private const val DVC_HANDOVER_MS = 60L
         private const val ART_SIZE_PX = 512
         private const val WAKE_LOCK_TIMEOUT_MS = 4 * 60 * 60 * 1000L
     }

@@ -13,6 +13,7 @@
 
 #include "AudioDecoder.h"
 #include "Dsp.h"
+#include "Quantizer.h"
 #include "RingBuffer.h"
 
 namespace resonix {
@@ -40,9 +41,13 @@ public:
     enum OutputApi : int { kApiAuto = 0, kApiAAudio = 1, kApiOpenSL = 2 };
     enum ReplayGainMode : int { kRgOff = 0, kRgTrack = 1, kRgAlbum = 2 };
 
-    // With "bit-perfect" off every track is converted to this one rate, so the
-    // output stream is never reopened between songs.
+    // With "bit-perfect" off every track is converted to one fixed rate (the device's native mixer
+    // rate, supplied by Kotlin; this is the fallback), so the stream is never reopened between songs.
     static constexpr int kFixedOutputRate = 48000;
+
+    // Values match the Kotlin enums (OutputFormat / DitherMode).
+    enum FormatPref : int { kFormatAuto = 0, kPrefFloat = 1, kPrefI16 = 2, kPrefI24 = 3, kPrefI32 = 4 };
+    enum DitherSetting : int { kDitherOff = 0, kDitherAuto = 1, kDitherAlways = 2 };
 
     AudioEngine();
     ~AudioEngine() override;
@@ -56,6 +61,10 @@ public:
     // it, so the caller may close its copy right after this returns). This is
     // the path the app uses: SAF / MediaStore files can't be re-opened by path.
     bool playTrackFd(int fd);
+
+    // The next playTrack()/playTrackFd() begins at this position instead of the start (used to
+    // carry on mid-song after the output device changed). Consumed by that call.
+    void setNextStartPosition(int64_t positionMs) { mNextStartMs.store(positionMs, std::memory_order_relaxed); }
 
     void pauseTrack();
     void resumeTrack();
@@ -83,6 +92,21 @@ public:
     void setOutputConfig(int api, bool exclusive, bool bitPerfect);
     void setReplayGainMode(int mode);
     void setLimiterEnabled(bool enabled);
+
+    // --- Output plan: where and in what shape the audio leaves the app ---------------
+    // Set by Kotlin before each track (and when the output device changes):
+    //  * [deviceId]: AudioDeviceInfo id to open the stream on (0 = whatever Android routes to);
+    //  * [forcedRateHz]: sample rate to convert to (0 = follow the Bit-perfect setting);
+    //  * [formatPref]: FormatPref — 0 lets the engine choose (32-bit float);
+    //  * [bitPerfectMixer]: Android 14+ bit-perfect mixer is engaged for this stream — it must be
+    //    opened with exactly this rate / format / channel count and no conversion of any kind;
+    //  * [nativeRateHz]: the device's own mixer rate, used when Bit-perfect is off.
+    // A changed device / format / mixer mode reopens the stream with the next track.
+    void setOutputPlan(int deviceId, int forcedRateHz, int formatPref, bool bitPerfectMixer,
+                       int nativeRateHz);
+
+    // Dither (DitherSetting) and resampler quality (0 Standard / 1 High / 2 Maximum).
+    void setFidelity(int ditherMode, int resamplerQuality);
 
     // --- Tools -> Sound shaping -------------------------------------------------
     void setPreampDb(double db) { mDsp.setPreampDb(db); }
@@ -124,8 +148,8 @@ private:
     // falling back to the other API if the preferred one cannot open at all
     // (a real, if rare, device-specific failure mode).
     oboe::Result openStreamLocked(int32_t sampleRate, int32_t channelCount);
-    oboe::Result tryOpenStream(int32_t sampleRate, int32_t channelCount,
-                               oboe::AudioApi audioApi, bool exclusive);
+    oboe::Result tryOpenStream(int32_t sampleRate, int32_t channelCount, oboe::AudioApi audioApi,
+                               bool exclusive, int deviceId, int format, bool strict);
     void closeStreamLocked();
 
     // Makes sure a stream exists for the loaded track and is running; reopens
@@ -136,11 +160,14 @@ private:
     // single multiplier the DSP chain uses.
     void applyReplayGain();
 
-    // Core DSP: reads from the ring buffer, runs the DSP chain, writes float32
-    // into `out`, silence-fills any underrun. Shared by onAudioReady and
+    // Core DSP: reads from the ring buffer, runs the DSP chain, quantises to `format`
+    // (SampleFormat) into `out`, silence-fills any underrun. Shared by onAudioReady and
     // pullProcessedFrames so the two output paths can never drift apart.
     // Returns frames written (clamped to mReadScratch's fixed capacity).
-    int32_t processIntoFloatBuffer(float *out, int32_t maxFrames, int32_t channelCount);
+    int32_t renderBlock(void *out, int32_t maxFrames, int32_t channelCount, int format);
+
+    // Grows the stream's buffer by one burst whenever it has underrun (audio thread).
+    void tuneBuffer(oboe::AudioStream *stream);
     void startDecodeThread();
     void stopDecodeThread();
     void decodeThreadLoop();
@@ -159,6 +186,7 @@ private:
     std::thread mDecodeThread;
     std::atomic<bool> mDecodeThreadRunning{false};
     std::atomic<int64_t> mPendingSeekMs{-1};
+    std::atomic<int64_t> mNextStartMs{-1};
 
     std::atomic<bool> mIsPlaying{false};
     std::atomic<double> mGain{1.0};
@@ -168,6 +196,23 @@ private:
     // during that window — the old track's end-of-stream flag is still set
     // while its buffer has just been flushed.
     std::atomic<bool> mLoading{false};
+
+    // Output plan + fidelity (any thread).
+    std::atomic<int> mDeviceId{0};
+    std::atomic<int> mForcedRate{0};
+    std::atomic<int> mFormatPref{kFormatAuto};
+    std::atomic<bool> mBitPerfectMixer{false};
+    std::atomic<int> mNativeRate{kFixedOutputRate};
+    std::atomic<int> mPlanGeneration{0};
+    std::atomic<int> mDitherMode{kDitherAuto};
+    std::atomic<int> mResamplerQuality{1};
+    // What the open stream was opened with (guarded by mStreamLock).
+    int mStreamPlanGeneration = -1;
+
+    // Describes the open stream to the audio thread.
+    std::atomic<int> mActiveFormat{kFormatFloat};
+    std::atomic<int> mSourceBits{32};     // bit depth of the loaded file (32 = lossy / float)
+    std::atomic<bool> mResampled{false};  // the decoder is changing the sample rate
 
     // User settings (any thread).
     std::atomic<int> mOutputApi{kApiAuto};
@@ -180,6 +225,13 @@ private:
     // pull path). configure() only happens inside tryOpenStream(), after the
     // previous stream was closed, so there is never a concurrent callback.
     DspChain mDsp;
+    Quantizer mQuantizer;
+
+    // Buffer tuning (audio thread, after the stream opened).
+    int32_t mBurstFrames = 0;
+    int32_t mCapacityFrames = 0;
+    int32_t mLastXRunCount = 0;
+    int32_t mCallbacksSinceCheck = 0;
 
     mutable std::mutex mTrackInfoLock;
     TrackInfo mTrackInfo;
