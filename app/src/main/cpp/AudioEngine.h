@@ -108,6 +108,14 @@ public:
     // Dither (DitherSetting) and resampler quality (0 Standard / 1 High / 2 Maximum).
     void setFidelity(int ditherMode, int resamplerQuality);
 
+    // --- Tools -> Equalizer ----------------------------------------------------------------
+    // One cascade: the graphic bands first, then the parametric ones (Kotlin builds the list).
+    void setEq(bool enabled, bool autoHeadroom, const EqBandParams *bands, int count) {
+        mDsp.setEqBands(bands, count, autoHeadroom);
+        mDsp.setEqEnabled(enabled);
+    }
+    double getEqHeadroomDb() const { return mDsp.eqHeadroomDb(); }
+
     // --- Tools -> Sound shaping -------------------------------------------------
     void setPreampDb(double db) { mDsp.setPreampDb(db); }
     void setBassBoost(double amount) { mDsp.setBassBoost(amount); }

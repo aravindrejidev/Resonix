@@ -315,4 +315,57 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeSetNextStartPosition(
     }
 }
 
+// --- Tools -> Equalizer ------------------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetEq(
+        JNIEnv *env, jobject /*thiz*/, jlong handle, jboolean enabled, jboolean autoHeadroom,
+        jintArray types, jdoubleArray freqs, jdoubleArray gains, jdoubleArray qs,
+        jbooleanArray active) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine == nullptr) {
+        return;
+    }
+    constexpr int kMax = resonix::EqChain::kMaxBands;
+    jsize count = env->GetArrayLength(types);
+    count = std::min<jsize>(count, kMax);
+    count = std::min<jsize>(count, env->GetArrayLength(freqs));
+    count = std::min<jsize>(count, env->GetArrayLength(gains));
+    count = std::min<jsize>(count, env->GetArrayLength(qs));
+    count = std::min<jsize>(count, env->GetArrayLength(active));
+    if (count < 0) {
+        count = 0;
+    }
+
+    jint typeBuf[kMax];
+    jdouble freqBuf[kMax];
+    jdouble gainBuf[kMax];
+    jdouble qBuf[kMax];
+    jboolean activeBuf[kMax];
+    if (count > 0) {
+        env->GetIntArrayRegion(types, 0, count, typeBuf);
+        env->GetDoubleArrayRegion(freqs, 0, count, freqBuf);
+        env->GetDoubleArrayRegion(gains, 0, count, gainBuf);
+        env->GetDoubleArrayRegion(qs, 0, count, qBuf);
+        env->GetBooleanArrayRegion(active, 0, count, activeBuf);
+    }
+
+    resonix::EqBandParams bands[kMax];
+    for (jsize i = 0; i < count; i++) {
+        bands[i].type = typeBuf[i];
+        bands[i].freqHz = freqBuf[i];
+        bands[i].gainDb = gainBuf[i];
+        bands[i].q = qBuf[i];
+        bands[i].enabled = activeBuf[i] == JNI_TRUE;
+    }
+    engine->setEq(enabled == JNI_TRUE, autoHeadroom == JNI_TRUE, bands, static_cast<int>(count));
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeGetEqHeadroomDb(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return engine != nullptr ? engine->getEqHeadroomDb() : 0.0;
+}
+
 }  // extern "C"

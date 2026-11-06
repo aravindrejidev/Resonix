@@ -73,3 +73,27 @@ currently chosen. System Back (and tapping the Settings tab again) steps out of 
 
 ## Tests that were run on the host (real FFmpeg, real Oboe headers, fake output device)
 `Dsp.h`, `Quantizer.h`, the decoder (FLAC/MP3/Opus), the whole `AudioEngine` (16-bit and 24-bit/96 kHz files are bit-exact at the output; plan → stream request; fallbacks; reopen rules; xrun handling; mid-song resume), and the planner / DVC maths.
+
+---
+
+# Round 4 – the equalizer engine (graphic + parametric)
+
+## Engine (`cpp/Eq.h`, wired into `cpp/Dsp.h` ahead of everything else in the chain)
+* One cascade of up to 32 biquads in 64-bit precision, one set of filter memories per channel.
+* Filter types: **Peak, Low shelf, High shelf, Low-pass, High-pass, Notch** (RBJ designs, Q-form for shelves — the same convention as Equalizer APO / AutoEQ).
+* **Glide, no clicks**: frequency, gain and Q glide to a new value in ~10 ms; switching a band on/off fades through flat; switching the EQ on/off cross-fades. Verified: a 0 → +15 dB jump produces no discontinuity.
+* **Auto headroom**: the stage is turned down by the highest point of the combined response (measured on a fine log grid at the real sample rate), so boosting can never clip.
+* **Bit-exact when idle**: EQ off, or every band at 0 dB → the stage is skipped entirely (a 16-bit file still comes out identical, verified end to end).
+* Real-time safe: parameters reach the audio thread through a sequence-locked set of atomics — no locks, no allocation; verified under ThreadSanitizer, AddressSanitizer and UBSan.
+
+## Settings / model (`audio/EqModel.kt`, `ui/AppSettings.kt`)
+* `peqEnabled`, `peqBands` (up to 16), `eqAutoHeadroom`; graphic EQ (`eqEnabled`, `eqBands`) is now applied too.
+* The graphic EQ is ten octave bands (31 Hz … 16 kHz, Q 1.41); both equalizers occupy fixed slots of one cascade, so turning one off never disturbs the other.
+* Filter maths in Kotlin = the engine's C++ maths to 3·10⁻¹² (checked against values printed from C++), so the curve on screen is exactly what is applied.
+
+## Tools screen
+* **Graphic EQ** card (PREVIEW tag removed) now has the Auto-headroom row.
+* **Parametric EQ** card, directly below it:
+  * live frequency-response graph — drag a dot sideways for frequency, up/down for gain; a touch that does not land on a dot still scrolls the page;
+  * band chips (1 · 80 Hz, …, + Add band), type chips, and for each of Frequency / Gain / Q: slider, − / + fine steps (1/12 octave, 0.1 dB, 0.05–0.5 Q) and a field you can tap to **type an exact value** ("2.5k", "-3.5", "0.71");
+  * Band on/off, 0 dB reset, Delete; **Paste** (AutoEQ / Equalizer APO text from the clipboard), **Copy** (same format), **Reset**.

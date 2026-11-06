@@ -169,6 +169,27 @@ class NativeAudioEngine {
         if (nativeHandle != 0L) nativeSetFidelity(nativeHandle, ditherMode, resamplerQuality)
     }
 
+    /**
+     * The equalizer: one cascade of [bands] (graphic bands first, then parametric — see EqLayout).
+     * [enabled] fades the whole stage in or out; [autoHeadroom] turns it down by the highest boost
+     * of the combined response so that boosting can never clip.
+     */
+    fun setEq(enabled: Boolean, autoHeadroom: Boolean, bands: List<EngineBand>) {
+        if (nativeHandle == 0L) return
+        val n = bands.size.coerceAtMost(32)
+        nativeSetEq(
+            nativeHandle, enabled, autoHeadroom,
+            IntArray(n) { bands[it].type },
+            DoubleArray(n) { bands[it].freqHz },
+            DoubleArray(n) { bands[it].gainDb },
+            DoubleArray(n) { bands[it].q },
+            BooleanArray(n) { bands[it].enabled },
+        )
+    }
+
+    /** How far the equalizer stage is currently turned down for headroom (≤ 0 dB). */
+    fun getEqHeadroomDb(): Double = if (nativeHandle != 0L) nativeGetEqHeadroomDb(nativeHandle) else 0.0
+
     /** What the output stream really is, e.g. "AAudio · Exclusive · 96 kHz". Empty before the first song. */
     fun getOutputDescription(): String {
         return if (nativeHandle != 0L) nativeGetOutputDescription(nativeHandle) else ""
@@ -240,6 +261,17 @@ class NativeAudioEngine {
     )
     private external fun nativeSetFidelity(handle: Long, ditherMode: Int, resamplerQuality: Int)
     private external fun nativeSetNextStartPosition(handle: Long, positionMs: Long)
+    private external fun nativeSetEq(
+        handle: Long,
+        enabled: Boolean,
+        autoHeadroom: Boolean,
+        types: IntArray,
+        freqs: DoubleArray,
+        gains: DoubleArray,
+        qs: DoubleArray,
+        active: BooleanArray
+    )
+    private external fun nativeGetEqHeadroomDb(handle: Long): Double
     private external fun nativePullSamples(
         handle: Long,
         outBuffer: FloatArray,

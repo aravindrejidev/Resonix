@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "Eq.h"
 #include "Limiter.h"
 
 namespace resonix {
@@ -14,7 +15,7 @@ namespace resonix {
 // The double-precision processing that sits between the ring buffer and the
 // float32 cast Oboe sees:
 //
-//   bass shelf -> stereo width -> balance -> (master * ReplayGain * preamp) -> peak limiter
+//   equalizer -> bass shelf -> stereo width -> balance -> (master * ReplayGain * preamp) -> peak limiter
 //
 // Every parameter is an atomic, so the UI thread can change it at any time while
 // the audio thread is inside process(). process() itself never allocates or locks.
@@ -33,7 +34,16 @@ public:
         mSampleRate.store(sampleRateHz > 0.0 ? sampleRateHz : 48000.0, std::memory_order_relaxed);
         mChannels.store(channelCount, std::memory_order_relaxed);
         mResetRequested.store(true, std::memory_order_release);
+        mEq.configure(sampleRateHz);
     }
+
+    // --- equalizer (graphic + parametric, one cascade; see Eq.h) ---------------------------
+    void setEqEnabled(bool enabled) { mEq.setEnabled(enabled); }
+    void setEqBands(const EqBandParams *bands, int count, bool autoHeadroom) {
+        mEq.setBands(bands, count, autoHeadroom);
+    }
+    // How far the equalizer stage is turned down for headroom (≤ 0 dB).
+    double eqHeadroomDb() const { return mEq.headroomDb(); }
 
     // --- parameters (any thread) ------------------------------------------------
 
@@ -75,6 +85,9 @@ public:
             resetState(sampleRate);
         }
 
+        mEq.process(data, frames, channels);
+        const bool eqActive = mEq.wasActive();
+
         const double targetGain = mMaster.load(std::memory_order_relaxed) *
                                   mReplay.load(std::memory_order_relaxed) *
                                   mPreamp.load(std::memory_order_relaxed);
@@ -109,7 +122,7 @@ public:
         }
 
         // Anything that can push samples above their original level is a reason to limit.
-        const bool canBoost = targetGain > 1.0001 || mGain > 1.0001 || doBass || (doWidth && width > 1.0);
+        const bool canBoost = targetGain > 1.0001 || mGain > 1.0001 || doBass || (doWidth && width > 1.0) || eqActive;
         const bool limit = limiterOn && canBoost;
         if (!limit) {
             mLimiter.reset();
@@ -161,7 +174,7 @@ public:
             }
         }
 
-        mLastNeutral = !doBass && !doWidth && std::fabs(targetGain - 1.0) < 1e-9 &&
+        mLastNeutral = !eqActive && !doBass && !doWidth && std::fabs(targetGain - 1.0) < 1e-9 &&
                        std::fabs(mGain - 1.0) < 1e-9 && std::fabs(mBalL - 1.0) < 1e-9 &&
                        std::fabs(mBalR - 1.0) < 1e-9;
 
@@ -261,6 +274,7 @@ private:
     double mBassDesigned = 0.0;
     Biquad mBassFilter[kMaxChannels];
     PeakLimiter mLimiter;
+    EqChain mEq;
 };
 
 }  // namespace resonix

@@ -46,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import com.resonix.player.ui.EQ_BAND_COUNT
 import com.resonix.player.ui.NowPlayingUiState
 import com.resonix.player.ui.SettingsState
+import com.resonix.player.ui.components.EqHeadroomRow
+import com.resonix.player.ui.components.ParametricEqCard
 import com.resonix.player.playback.SleepTimerState
 import com.resonix.player.ui.neo.NeoCard
 import com.resonix.player.ui.neo.NeoChip
@@ -110,12 +112,13 @@ internal fun ScreenHeader(title: String, subtitle: String, modifier: Modifier = 
 }
 
 /**
- * Tools: the equaliser and the other sound / playback controls.
+ * Tools: the equalizers and the other sound / playback controls.
  *
- * Preamp, bass boost, stereo width and balance, the sleep timer and the signal card are live —
- * PlaybackService feeds the first four into the audio engine as they change. Only the equaliser
- * is an interface for now: its bands are saved in [SettingsState] and shown, but the engine does
- * not read them yet.
+ * Everything here is live — PlaybackService feeds it into the audio engine as it changes. Two
+ * equalizers sit one under the other and work together as one cascade: the graphic EQ (ten fixed
+ * bands, quick presets) and the parametric EQ (up to 16 bands with exact frequency, gain and Q,
+ * AutoEQ import). Preamp, bass boost, stereo width and balance follow, then the sleep timer and
+ * the signal card.
  */
 @Composable
 fun ToolsScreen(
@@ -138,6 +141,7 @@ fun ToolsScreen(
     ) {
         ScreenHeader(title = "Tools", subtitle = "Shape your sound")
         EqualizerCard(settings = settings, onChange = onSettingsChange)
+        ParametricEqCard(settings = settings, onChange = onSettingsChange)
         SoundCard(settings = settings, onChange = onSettingsChange)
         SleepTimerCard(timer = sleepTimer, onSelect = onSleepTimer)
         SignalCard(state = nowPlaying)
@@ -176,11 +180,7 @@ private fun EqualizerCard(settings: SettingsState, onChange: ((SettingsState) ->
             NeoIconBadge(icon = NeoIcons.Equalizer, diameter = 46.dp)
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(text = "Equalizer", color = neo.textPrimary, style = NeoType.heading)
-                    Spacer(Modifier.width(8.dp))
-                    PreviewTag()
-                }
+                Text(text = "Graphic EQ", color = neo.textPrimary, style = NeoType.heading)
                 Text(
                     text = if (settings.eqEnabled) settings.eqPreset else "Off",
                     color = neo.textSecondary,
@@ -250,18 +250,8 @@ private fun EqualizerCard(settings: SettingsState, onChange: ((SettingsState) ->
                 )
             }
         }
-    }
-}
 
-@Composable
-private fun PreviewTag() {
-    val neo = LocalNeoColors.current
-    Box(
-        modifier = Modifier
-            .neoInset(cornerRadius = 9.dp, elevation = 2.dp)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Text(text = "PREVIEW", color = neo.accent, style = NeoType.tiny.copy(fontWeight = FontWeight.ExtraBold))
+        EqHeadroomRow(settings = settings, onChange = onChange)
     }
 }
 

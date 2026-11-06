@@ -1,6 +1,9 @@
 package com.resonix.player.ui
 
 import android.content.Context
+import com.resonix.player.audio.EqCodec
+import com.resonix.player.audio.PeqBand
+import com.resonix.player.audio.defaultPeqBands
 import com.resonix.player.ui.theme.AccentColor
 import com.resonix.player.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -103,11 +106,16 @@ data class SettingsState(
     val usbBitPerfect: Boolean = true,
     val peakLimiter: Boolean = true,
 
-    // Tools — equalizer (UI only for now)
+    // Tools — equalizer
     val eqEnabled: Boolean = false,
     val eqPreset: String = "Flat",
     /** One gain per band in dB, −12 … +12. */
     val eqBands: List<Float> = List(EQ_BAND_COUNT) { 0f },
+    /** The parametric equalizer: its own switch, and up to 16 bands (type, frequency, gain, Q). */
+    val peqEnabled: Boolean = false,
+    val peqBands: List<PeqBand> = defaultPeqBands(),
+    /** Turn the whole equalizer down by its highest boost, so boosting a band can never clip. */
+    val eqAutoHeadroom: Boolean = true,
 
     // Tools — sound shaping (applied by the engine)
     /** dB, −12 … +12. */
@@ -175,6 +183,9 @@ class AppSettings private constructor(context: Context) {
             eqEnabled = prefs.getBoolean(KEY_EQ_ON, d.eqEnabled),
             eqPreset = prefs.getString(KEY_EQ_PRESET, d.eqPreset) ?: d.eqPreset,
             eqBands = bands,
+            peqEnabled = prefs.getBoolean(KEY_PEQ_ON, d.peqEnabled),
+            peqBands = EqCodec.decode(prefs.getString(KEY_PEQ_BANDS, null)) ?: d.peqBands,
+            eqAutoHeadroom = prefs.getBoolean(KEY_EQ_HEADROOM, d.eqAutoHeadroom),
             preamp = prefs.getFloat(KEY_PREAMP, d.preamp),
             bassBoost = prefs.getFloat(KEY_BASS, d.bassBoost),
             stereoWidth = prefs.getFloat(KEY_WIDTH, d.stereoWidth),
@@ -209,6 +220,9 @@ class AppSettings private constructor(context: Context) {
             .putBoolean(KEY_EQ_ON, s.eqEnabled)
             .putString(KEY_EQ_PRESET, s.eqPreset)
             .putString(KEY_EQ_BANDS, s.eqBands.joinToString(","))
+            .putBoolean(KEY_PEQ_ON, s.peqEnabled)
+            .putString(KEY_PEQ_BANDS, EqCodec.encode(s.peqBands))
+            .putBoolean(KEY_EQ_HEADROOM, s.eqAutoHeadroom)
             .putFloat(KEY_PREAMP, s.preamp)
             .putFloat(KEY_BASS, s.bassBoost)
             .putFloat(KEY_WIDTH, s.stereoWidth)
@@ -251,6 +265,9 @@ class AppSettings private constructor(context: Context) {
         private const val KEY_EQ_ON = "eq_enabled"
         private const val KEY_EQ_PRESET = "eq_preset"
         private const val KEY_EQ_BANDS = "eq_bands"
+        private const val KEY_PEQ_ON = "peq_enabled"
+        private const val KEY_PEQ_BANDS = "peq_bands"
+        private const val KEY_EQ_HEADROOM = "eq_auto_headroom"
         private const val KEY_PREAMP = "preamp_db"
         private const val KEY_BASS = "bass_boost"
         private const val KEY_WIDTH = "stereo_width"
