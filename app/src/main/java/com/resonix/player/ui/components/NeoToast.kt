@@ -16,7 +16,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.resonix.player.ui.neo.NeoIconBadge
 import com.resonix.player.ui.neo.NeoIcons
-import com.resonix.player.ui.neo.neoRaised
+import com.resonix.player.ui.neo.neoFloating
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
 
@@ -31,7 +31,7 @@ fun NeoToast(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .neoRaised(cornerRadius = 26.dp, elevation = 7.dp)
+            .neoFloating(cornerRadius = 22.dp, elevation = 10.dp)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -40,7 +40,7 @@ fun NeoToast(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        NeoIconBadge(icon = NeoIcons.Info, diameter = 36.dp)
+        NeoIconBadge(icon = NeoIcons.Info, diameter = 34.dp)
         Spacer(Modifier.width(12.dp))
         Text(
             text = text,

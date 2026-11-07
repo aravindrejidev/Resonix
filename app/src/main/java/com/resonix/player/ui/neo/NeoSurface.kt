@@ -3,9 +3,13 @@ package com.resonix.player.ui.neo
 import android.graphics.Paint
 import android.graphics.RectF
 import android.os.Build
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -33,6 +37,13 @@ val InsetDepth: () -> Float = { 1f }
 internal fun Color.scaleAlpha(factor: Float): Color = copy(alpha = alpha * factor)
 
 private val canDrawShadowLayer: Boolean get() = Build.VERSION.SDK_INT >= 28
+
+/**
+ * Two dials for the old two-shadow surface ([neoSurface], [neoRaised], [neoInset]). The app now
+ * uses it only sparingly; these keep any remaining use gentle. 1 = the original strength.
+ */
+private const val ShadowOffsetScale = 0.55f
+private const val ShadowAlphaScale = 0.55f
 
 /**
  * The heart of the neumorphic look.
@@ -63,7 +74,7 @@ fun Modifier.neoSurface(
         val w = size.width
         val h = size.height
         val radius = minOf(cornerRadius.toPx(), minOf(w, h) / 2f)
-        val off = elevation.toPx()
+        val off = elevation.toPx() * ShadowOffsetScale
         val blur = off * 2f
         val rect = RectF(0f, 0f, w, h)
         val roundRect = RoundRect(0f, 0f, w, h, CornerRadius(radius, radius))
@@ -91,9 +102,9 @@ fun Modifier.neoSurface(
                     drawIntoCanvas { canvas ->
                         val nc = canvas.nativeCanvas
                         paint.color = base.toArgb()
-                        paint.setShadowLayer(blur, -off, -off, neo.shadowLight.scaleAlpha(raised).toArgb())
+                        paint.setShadowLayer(blur, -off, -off, neo.shadowLight.scaleAlpha(raised * ShadowAlphaScale).toArgb())
                         nc.drawRoundRect(rect, radius, radius, paint)
-                        paint.setShadowLayer(blur, off, off, neo.shadowDark.scaleAlpha(raised).toArgb())
+                        paint.setShadowLayer(blur, off, off, neo.shadowDark.scaleAlpha(raised * ShadowAlphaScale).toArgb())
                         nc.drawRoundRect(rect, radius, radius, paint)
                         paint.clearShadowLayer()
                     }
@@ -121,9 +132,9 @@ fun Modifier.neoSurface(
                     drawIntoCanvas { canvas ->
                         val nc = canvas.nativeCanvas
                         paint.color = base.toArgb()
-                        paint.setShadowLayer(blur, off, off, neo.shadowDark.scaleAlpha(d).toArgb())
+                        paint.setShadowLayer(blur, off, off, neo.shadowDark.scaleAlpha(d * ShadowAlphaScale).toArgb())
                         nc.drawPath(androidFrame, paint)
-                        paint.setShadowLayer(blur, -off, -off, neo.shadowLight.scaleAlpha(d).toArgb())
+                        paint.setShadowLayer(blur, -off, -off, neo.shadowLight.scaleAlpha(d * ShadowAlphaScale).toArgb())
                         nc.drawPath(androidFrame, paint)
                         paint.clearShadowLayer()
                     }
@@ -175,6 +186,84 @@ fun Modifier.neoRaised(cornerRadius: Dp = 20.dp, elevation: Dp = 6.dp): Modifier
 fun Modifier.neoInset(cornerRadius: Dp = 20.dp, elevation: Dp = 5.dp): Modifier =
     neoSurface(cornerRadius = cornerRadius, elevation = elevation, depth = InsetDepth)
 
+// ───────────────────────────── flat layer ─────────────────────────────
+//
+// Most of the interface is flat: surfaces are told apart by tone and a hairline, not by shadow.
+// Shadow is kept for the things that really sit above something else (the floating bars and
+// menus) and for the little parts you grab (thumbs, knobs, the play button).
+
+/** A flat card: a slightly lighter fill with a hairline edge. No shadow. */
+@Composable
+fun Modifier.neoFlat(
+    cornerRadius: Dp = 20.dp,
+    fill: Color = Color.Unspecified,
+    border: Boolean = true,
+): Modifier {
+    val neo = LocalNeoColors.current
+    val shape = RoundedCornerShape(cornerRadius)
+    val base = if (fill == Color.Unspecified) neo.card else fill
+    return this
+        .background(base, shape)
+        .then(if (border) Modifier.border(1.dp, neo.outline, shape) else Modifier)
+}
+
+/** A flat recessed area (track, display, badge): a slightly darker fill. No shadow. */
+@Composable
+fun Modifier.neoWell(
+    cornerRadius: Dp = 20.dp,
+    border: Boolean = false,
+): Modifier {
+    val neo = LocalNeoColors.current
+    val shape = RoundedCornerShape(cornerRadius)
+    return this
+        .background(neo.well, shape)
+        .then(if (border) Modifier.border(1.dp, neo.outline, shape) else Modifier)
+}
+
+/**
+ * A panel that floats above the content (navigation bar, mini player, menus, toast): one soft
+ * drop shadow underneath, a flat fill and a hairline edge. This is where shadow earns its place.
+ */
+@Composable
+fun Modifier.neoFloating(
+    cornerRadius: Dp = 24.dp,
+    elevation: Dp = 10.dp,
+): Modifier {
+    val neo = LocalNeoColors.current
+    val shape = RoundedCornerShape(cornerRadius)
+    return this
+        .shadow(
+            elevation = elevation,
+            shape = shape,
+            clip = false,
+            ambientColor = Color.Black.copy(alpha = if (neo.isDark) 0.40f else 0.10f),
+            spotColor = Color.Black.copy(alpha = if (neo.isDark) 0.55f else 0.22f),
+        )
+        .background(neo.card, shape)
+        .border(1.dp, neo.outline, shape)
+}
+
+/** The part of a control you grab (slider thumb, knob cap, switch thumb): a small, tight shadow. */
+@Composable
+fun Modifier.neoThumb(
+    cornerRadius: Dp = 14.dp,
+    elevation: Dp = 3.dp,
+    fill: Color = Color.Unspecified,
+): Modifier {
+    val neo = LocalNeoColors.current
+    val shape = RoundedCornerShape(cornerRadius)
+    return this
+        .shadow(
+            elevation = elevation,
+            shape = shape,
+            clip = false,
+            ambientColor = Color.Black.copy(alpha = if (neo.isDark) 0.35f else 0.08f),
+            spotColor = Color.Black.copy(alpha = if (neo.isDark) 0.50f else 0.20f),
+        )
+        .background(if (fill == Color.Unspecified) neo.thumb else fill, shape)
+        .border(1.dp, neo.outline, shape)
+}
+
 /**
  * The glowing accent-coloured body used by primary buttons. [press] (0..1) dims the glow
  * while the button is held down.
@@ -208,7 +297,7 @@ fun Modifier.neoAccentSurface(
                 val nc = canvas.nativeCanvas
                 paint.color = neo.accent.toArgb()
                 if (canDrawShadowLayer) {
-                    paint.setShadowLayer(glowPx, 0f, glowPx * 0.3f, neo.accent.copy(alpha = 0.55f * (1f - 0.6f * p)).toArgb())
+                    paint.setShadowLayer(glowPx, 0f, glowPx * 0.3f, neo.accent.copy(alpha = 0.34f * (1f - 0.6f * p)).toArgb())
                 }
                 nc.drawRoundRect(rect, radius, radius, paint)
                 paint.clearShadowLayer()

@@ -72,15 +72,13 @@ import com.resonix.player.audio.parseNumberInput
 import com.resonix.player.audio.qToFraction
 import com.resonix.player.audio.suggestNewBandFreq
 import com.resonix.player.ui.SettingsState
-import com.resonix.player.ui.neo.NeoCard
 import com.resonix.player.ui.neo.NeoChip
-import com.resonix.player.ui.neo.NeoIconBadge
-import com.resonix.player.ui.neo.NeoIcons
 import com.resonix.player.ui.neo.NeoInsetPanel
 import com.resonix.player.ui.neo.NeoSlider
 import com.resonix.player.ui.neo.NeoSwitch
 import com.resonix.player.ui.neo.bleedHorizontally
-import com.resonix.player.ui.neo.neoInset
+import com.resonix.player.ui.neo.neoFlat
+import com.resonix.player.ui.neo.neoWell
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
 import com.resonix.player.util.AppMessages
@@ -126,12 +124,13 @@ fun EqHeadroomRow(
 }
 
 /**
- * The parametric equalizer: up to 16 bands, each a peak, shelf, pass or notch filter with exact
- * frequency, gain and Q. Only one of the two equalizers is on at a time: switching this one on
- * turns the graphic equalizer above it off (see AppSettings.update).
+ * The parametric equalizer's controls: up to 16 bands, each a peak, shelf, pass or notch filter
+ * with exact frequency, gain and Q. It is the "Parametric" page of the Equalizer card on the Tools
+ * screen — the card, its switch and the headroom row live there. Only one of the two equalizers is
+ * on at a time (see AppSettings.update).
  */
 @Composable
-fun ParametricEqCard(
+fun ParametricEqBody(
     settings: SettingsState,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
     modifier: Modifier = Modifier,
@@ -150,34 +149,12 @@ fun ParametricEqCard(
         }
     }
 
-    // What you hear when this equalizer is on: just these bands; shown dimmed while the switch is off.
+    // The curve of just these bands; drawn dimmed while the equalizer is off.
     val curveBands = remember(bands) {
         EqLayout.build(false, settings.eqBands, true, bands)
     }
 
-    NeoCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            NeoIconBadge(icon = NeoIcons.Tools, diameter = 46.dp)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = "Parametric EQ", color = neo.textPrimary, style = NeoType.heading)
-                Text(
-                    text = when {
-                        settings.peqEnabled -> "${bands.count { it.enabled }} of ${bands.size} bands on"
-                        settings.eqEnabled -> "Off · Graphic EQ is on"
-                        else -> "Off"
-                    },
-                    color = neo.textSecondary,
-                    style = NeoType.caption,
-                )
-            }
-            NeoSwitch(
-                checked = settings.peqEnabled,
-                onCheckedChange = { on -> onChange { it.copy(peqEnabled = on) } },
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
+    Column(modifier = modifier.fillMaxWidth()) {
         PeqGraph(
             curveBands = curveBands,
             nodes = bands,
@@ -199,11 +176,11 @@ fun ParametricEqCard(
         )
         FrequencyAxis()
 
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(10.dp))
         LazyRow(
             modifier = Modifier.bleedHorizontally(18.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 18.dp),
         ) {
             itemsIndexed(bands) { index, band ->
                 NeoChip(
@@ -227,6 +204,7 @@ fun ParametricEqCard(
             }
         }
 
+        Spacer(Modifier.height(14.dp))
         val band = bands.getOrNull(selected)
         if (band == null) {
             Text(
@@ -247,11 +225,8 @@ fun ParametricEqCard(
             )
         }
 
-        Spacer(Modifier.height(10.dp))
-        EqHeadroomRow(settings = settings, onChange = onChange)
-
         Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             NeoChip(
                 text = "Paste",
                 selected = false,
@@ -362,8 +337,7 @@ private fun PeqGraph(
         modifier = Modifier
             .fillMaxWidth()
             .height(210.dp),
-        cornerRadius = 22.dp,
-        elevation = 4.dp,
+        cornerRadius = 18.dp,
     ) {
         Canvas(
             modifier = Modifier
@@ -468,74 +442,83 @@ private fun BandEditor(
 ) {
     val neo = LocalNeoColors.current
 
-    Text(text = "BAND $number", color = neo.textTertiary, style = NeoType.overline)
-    LazyRow(
-        modifier = Modifier.bleedHorizontally(18.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 10.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .neoWell(cornerRadius = 18.dp)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
     ) {
-        items(PeqType.entries.toList(), key = { it.name }) { type ->
-            NeoChip(
-                text = type.label,
-                selected = band.type == type,
-                onClick = { onChange(band.copy(type = type)) },
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text = "BAND $number", color = neo.textTertiary, style = NeoType.overline, modifier = Modifier.weight(1f))
+            Text(text = "Band on", color = neo.textSecondary, style = NeoType.caption)
+            Spacer(Modifier.width(10.dp))
+            NeoSwitch(checked = band.enabled, onCheckedChange = { onChange(band.copy(enabled = it)) })
+        }
+        Spacer(Modifier.height(12.dp))
+        LazyRow(
+            modifier = Modifier.bleedHorizontally(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 14.dp),
+        ) {
+            items(PeqType.entries.toList(), key = { it.name }) { type ->
+                NeoChip(
+                    text = type.label,
+                    selected = band.type == type,
+                    onClick = { onChange(band.copy(type = type)) },
+                )
+            }
+        }
+
+        ParamRow(
+            label = "Frequency",
+            shown = formatFreq(band.freqHz),
+            editText = formatFreq(band.freqHz).replace(" kHz", "k").replace(" Hz", ""),
+            fraction = freqToFraction(band.freqHz),
+            onFraction = { onChange(band.copy(freqHz = roundedFreq(fractionToFreq(it)))) },
+            onStep = { direction -> onChange(band.copy(freqHz = roundedFreq(band.freqHz * 2f.pow(direction / 12f)))) },
+            onTyped = { text -> parseFreqInput(text)?.let { onChange(band.copy(freqHz = it)) } },
+        )
+
+        if (band.type.hasGain) {
+            ParamRow(
+                label = "Gain",
+                shown = formatGain(band.gainDb),
+                editText = String.format(java.util.Locale.US, "%.1f", band.gainDb),
+                fraction = (band.gainDb - EqLimits.MIN_GAIN) / (EqLimits.MAX_GAIN - EqLimits.MIN_GAIN),
+                centered = true,
+                onFraction = {
+                    val db = EqLimits.MIN_GAIN + it * (EqLimits.MAX_GAIN - EqLimits.MIN_GAIN)
+                    onChange(band.copy(gainDb = EqLimits.gain((db * 10f).roundToInt() / 10f)))
+                },
+                onStep = { direction -> onChange(band.copy(gainDb = EqLimits.gain(((band.gainDb + direction * 0.1f) * 10f).roundToInt() / 10f))) },
+                onTyped = { text -> parseNumberInput(text)?.let { onChange(band.copy(gainDb = EqLimits.gain(it))) } },
             )
         }
-    }
 
-    ParamRow(
-        label = "Frequency",
-        shown = formatFreq(band.freqHz),
-        editText = formatFreq(band.freqHz).replace(" kHz", "k").replace(" Hz", ""),
-        fraction = freqToFraction(band.freqHz),
-        onFraction = { onChange(band.copy(freqHz = roundedFreq(fractionToFreq(it)))) },
-        onStep = { direction -> onChange(band.copy(freqHz = roundedFreq(band.freqHz * 2f.pow(direction / 12f)))) },
-        onTyped = { text -> parseFreqInput(text)?.let { onChange(band.copy(freqHz = it)) } },
-    )
-
-    if (band.type.hasGain) {
         ParamRow(
-            label = "Gain",
-            shown = formatGain(band.gainDb),
-            editText = String.format(java.util.Locale.US, "%.1f", band.gainDb),
-            fraction = (band.gainDb - EqLimits.MIN_GAIN) / (EqLimits.MAX_GAIN - EqLimits.MIN_GAIN),
-            centered = true,
-            onFraction = {
-                val db = EqLimits.MIN_GAIN + it * (EqLimits.MAX_GAIN - EqLimits.MIN_GAIN)
-                onChange(band.copy(gainDb = EqLimits.gain((db * 10f).roundToInt() / 10f)))
+            label = "Q (width)",
+            shown = formatQ(band.q),
+            editText = String.format(java.util.Locale.US, "%.2f", band.q),
+            fraction = qToFraction(band.q),
+            onFraction = { onChange(band.copy(q = roundedQ(fractionToQ(it)))) },
+            onStep = { direction ->
+                val step = when {
+                    band.q < 1f -> 0.05f
+                    band.q < 5f -> 0.1f
+                    else -> 0.5f
+                }
+                onChange(band.copy(q = EqLimits.q(((band.q + direction * step) * 100f).roundToInt() / 100f)))
             },
-            onStep = { direction -> onChange(band.copy(gainDb = EqLimits.gain(((band.gainDb + direction * 0.1f) * 10f).roundToInt() / 10f))) },
-            onTyped = { text -> parseNumberInput(text)?.let { onChange(band.copy(gainDb = EqLimits.gain(it))) } },
+            onTyped = { text -> parseNumberInput(text)?.let { onChange(band.copy(q = EqLimits.q(it))) } },
         )
-    }
 
-    ParamRow(
-        label = "Q (width)",
-        shown = formatQ(band.q),
-        editText = String.format(java.util.Locale.US, "%.2f", band.q),
-        fraction = qToFraction(band.q),
-        onFraction = { onChange(band.copy(q = roundedQ(fractionToQ(it)))) },
-        onStep = { direction ->
-            val step = when {
-                band.q < 1f -> 0.05f
-                band.q < 5f -> 0.1f
-                else -> 0.5f
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (band.type.hasGain && band.gainDb != 0f) {
+                NeoChip(text = "0 dB", selected = false, onClick = { onChange(band.copy(gainDb = 0f)) })
             }
-            onChange(band.copy(q = EqLimits.q(((band.q + direction * step) * 100f).roundToInt() / 100f)))
-        },
-        onTyped = { text -> parseNumberInput(text)?.let { onChange(band.copy(q = EqLimits.q(it))) } },
-    )
-
-    Spacer(Modifier.height(6.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(text = "Band on", color = neo.textPrimary, style = NeoType.body, modifier = Modifier.weight(1f))
-        NeoSwitch(checked = band.enabled, onCheckedChange = { onChange(band.copy(enabled = it)) })
-        Spacer(Modifier.width(14.dp))
-        if (band.type.hasGain && band.gainDb != 0f) {
-            NeoChip(text = "0 dB", selected = false, onClick = { onChange(band.copy(gainDb = 0f)) })
-            Spacer(Modifier.width(10.dp))
+            NeoChip(text = "Delete band", selected = false, onClick = onDelete)
         }
-        NeoChip(text = "Delete", selected = false, onClick = onDelete)
     }
 }
 
@@ -563,21 +546,20 @@ private fun ParamRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 6.dp),
+            .padding(top = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(text = label, color = neo.textSecondary, style = NeoType.body, modifier = Modifier.weight(1f))
         NeoChip(text = "−", selected = false, onClick = { onStep(-1f) })
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(6.dp))
         ValueField(shown = shown, editText = editText, onCommit = onTyped)
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(6.dp))
         NeoChip(text = "+", selected = false, onClick = { onStep(1f) })
     }
     NeoSlider(
         value = fraction,
         onValueChange = onFraction,
         centered = centered,
-        modifier = Modifier.padding(vertical = 4.dp),
     )
 }
 
@@ -592,8 +574,8 @@ private fun ValueField(shown: String, editText: String, onCommit: (String) -> Un
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
-            .widthIn(min = 92.dp)
-            .neoInset(cornerRadius = 14.dp, elevation = 2.dp),
+            .widthIn(min = 84.dp)
+            .neoFlat(cornerRadius = 12.dp),
     ) {
         if (!editing) {
             Text(

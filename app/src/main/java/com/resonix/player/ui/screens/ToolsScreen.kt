@@ -21,17 +21,19 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -40,29 +42,34 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.resonix.player.ui.EQ_BAND_COUNT
 import com.resonix.player.ui.NowPlayingUiState
 import com.resonix.player.ui.SettingsState
 import com.resonix.player.ui.components.EqHeadroomRow
-import com.resonix.player.ui.components.ParametricEqCard
+import com.resonix.player.ui.components.ParametricEqBody
 import com.resonix.player.playback.SleepTimerState
 import com.resonix.player.ui.neo.NeoCard
 import com.resonix.player.ui.neo.NeoChip
+import com.resonix.player.ui.neo.NeoDivider
 import com.resonix.player.ui.neo.NeoHiResTag
 import com.resonix.player.ui.neo.NeoIconBadge
 import com.resonix.player.ui.neo.NeoIcons
 import com.resonix.player.ui.neo.NeoInsetPanel
 import com.resonix.player.ui.neo.NeoKnob
+import com.resonix.player.ui.neo.NeoSectionLabel
+import com.resonix.player.ui.neo.NeoSegmented
 import com.resonix.player.ui.neo.NeoSlider
 import com.resonix.player.ui.neo.NeoSwitch
 import com.resonix.player.ui.neo.NeoVerticalSlider
 import com.resonix.player.ui.neo.bleedHorizontally
 import com.resonix.player.ui.neo.formatDuration
 import com.resonix.player.ui.neo.isHiRes
-import com.resonix.player.ui.neo.neoInset
+import com.resonix.player.ui.neo.neoWell
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
 import kotlinx.coroutines.delay
@@ -112,13 +119,12 @@ internal fun ScreenHeader(title: String, subtitle: String, modifier: Modifier = 
 }
 
 /**
- * Tools: the equalizers and the other sound / playback controls.
+ * Tools: the equalizer and the other sound / playback controls, in four labelled groups.
  *
- * Everything here is live — PlaybackService feeds it into the audio engine as it changes. Two
- * equalizers sit one under the other and work together as one cascade: the graphic EQ (ten fixed
- * bands, quick presets) and the parametric EQ (up to 16 bands with exact frequency, gain and Q,
- * AutoEQ import). Preamp, bass boost, stereo width and balance follow, then the sleep timer and
- * the signal card.
+ * Everything here is live — PlaybackService feeds it into the audio engine as it changes. The
+ * Equalizer card holds both equalizers (graphic: ten fixed bands and quick presets; parametric: up
+ * to 16 bands with exact frequency, gain and Q, AutoEQ import) behind one switch and one tab bar;
+ * only one of them is on at a time. Sound shaping, the sleep timer and the signal card follow.
  */
 @Composable
 fun ToolsScreen(
@@ -136,22 +142,131 @@ fun ToolsScreen(
             .fillMaxSize()
             .verticalScroll(scrollState)
             .statusBarsPadding()
-            .padding(start = 22.dp, end = 22.dp, bottom = bottomInset),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
+            .padding(start = 20.dp, end = 20.dp, bottom = bottomInset),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
         ScreenHeader(title = "Tools", subtitle = "Shape your sound")
-        EqualizerCard(settings = settings, onChange = onSettingsChange)
-        ParametricEqCard(settings = settings, onChange = onSettingsChange)
-        SoundCard(settings = settings, onChange = onSettingsChange)
-        SleepTimerCard(timer = sleepTimer, onSelect = onSleepTimer)
-        SignalCard(state = nowPlaying)
+        ToolsSection("Equalizer") { EqualizerSection(settings = settings, onChange = onSettingsChange) }
+        ToolsSection("Sound") { SoundCard(settings = settings, onChange = onSettingsChange) }
+        ToolsSection("Timer") { SleepTimerCard(timer = sleepTimer, onSelect = onSleepTimer) }
+        ToolsSection("Signal") { SignalCard(state = nowPlaying) }
+    }
+}
+
+/** A small caps label with its card underneath. */
+@Composable
+private fun ToolsSection(label: String, content: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        NeoSectionLabel(label)
+        content()
+    }
+}
+
+/** Icon, title and one line of status at the top of a card, with an optional control on the right. */
+@Composable
+private fun CardHeader(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+    subtitleColor: Color = Color.Unspecified,
+    trailing: @Composable () -> Unit = {},
+) {
+    val neo = LocalNeoColors.current
+    Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        NeoIconBadge(icon = icon, diameter = 44.dp)
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, color = neo.textPrimary, style = NeoType.heading)
+            Text(
+                text = subtitle,
+                color = if (subtitleColor == Color.Unspecified) neo.textSecondary else subtitleColor,
+                style = NeoType.caption,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        trailing()
     }
 }
 
 // ───────────────────────────── equaliser ─────────────────────────────
 
+/**
+ * One card for both equalizers. The switch turns the equalizer on or off; the tabs choose which
+ * one you are looking at. While it is on, picking the other tab switches to that equalizer — so
+ * what you see is always what you hear, and only one of the two ever runs.
+ */
 @Composable
-private fun EqualizerCard(settings: SettingsState, onChange: ((SettingsState) -> SettingsState) -> Unit) {
+private fun EqualizerSection(settings: SettingsState, onChange: ((SettingsState) -> SettingsState) -> Unit) {
+    val neo = LocalNeoColors.current
+    var tab by rememberSaveable { mutableStateOf(if (settings.peqEnabled) 1 else 0) }
+    val active = settings.eqEnabled || settings.peqEnabled
+
+    // Follow the equalizer that is actually running (a pasted AutoEQ list, a preset, a restart).
+    LaunchedEffect(settings.eqEnabled, settings.peqEnabled) {
+        if (settings.peqEnabled) tab = 1 else if (settings.eqEnabled) tab = 0
+    }
+
+    val status = when {
+        settings.eqEnabled -> "Graphic · ${settings.eqPreset}"
+        settings.peqEnabled -> "Parametric · ${settings.peqBands.count { it.enabled }} of ${settings.peqBands.size} bands on"
+        else -> "Off"
+    }
+
+    NeoCard(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
+        CardHeader(
+            icon = NeoIcons.Equalizer,
+            title = "Equalizer",
+            subtitle = status,
+            subtitleColor = if (active) neo.accent else Color.Unspecified,
+        ) {
+            NeoSwitch(
+                checked = active,
+                onCheckedChange = { on ->
+                    val graphic = tab == 0
+                    onChange { s ->
+                        when {
+                            !on -> s.copy(eqEnabled = false, peqEnabled = false)
+                            graphic -> s.copy(eqEnabled = true)
+                            else -> s.copy(peqEnabled = true)
+                        }
+                    }
+                },
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+        NeoSegmented(
+            options = listOf("Graphic", "Parametric"),
+            selectedIndex = tab,
+            onSelect = { index ->
+                tab = index
+                if (active) {
+                    onChange { s -> if (index == 0) s.copy(eqEnabled = true) else s.copy(peqEnabled = true) }
+                }
+            },
+        )
+
+        Spacer(Modifier.height(16.dp))
+        Column(modifier = Modifier.alpha(if (active) 1f else 0.55f)) {
+            if (tab == 0) {
+                GraphicEqBody(settings = settings, onChange = onChange)
+            } else {
+                ParametricEqBody(settings = settings, onChange = onChange)
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        NeoDivider()
+        Spacer(Modifier.height(14.dp))
+        EqHeadroomRow(settings = settings, onChange = onChange)
+    }
+}
+
+/** The graphic equalizer: the response curve, ten faders and the presets. */
+@Composable
+private fun GraphicEqBody(settings: SettingsState, onChange: ((SettingsState) -> SettingsState) -> Unit) {
     val neo = LocalNeoColors.current
     var dragging by remember { mutableStateOf(false) }
 
@@ -175,32 +290,10 @@ private fun EqualizerCard(settings: SettingsState, onChange: ((SettingsState) ->
         }
     }
 
-    NeoCard(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            NeoIconBadge(icon = NeoIcons.Equalizer, diameter = 46.dp)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = "Graphic EQ", color = neo.textPrimary, style = NeoType.heading)
-                Text(
-                    text = when {
-                        settings.eqEnabled -> settings.eqPreset
-                        settings.peqEnabled -> "Off · Parametric EQ is on"
-                        else -> "Off"
-                    },
-                    color = neo.textSecondary,
-                    style = NeoType.caption,
-                )
-            }
-            NeoSwitch(
-                checked = settings.eqEnabled,
-                onCheckedChange = { on -> onChange { it.copy(eqEnabled = on) } },
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
+    Column(modifier = Modifier.fillMaxWidth()) {
         EqDisplay(bands = shown, active = settings.eqEnabled)
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -233,11 +326,11 @@ private fun EqualizerCard(settings: SettingsState, onChange: ((SettingsState) ->
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(14.dp))
         LazyRow(
             modifier = Modifier.bleedHorizontally(18.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 18.dp),
         ) {
             if (settings.eqPreset == "Custom") {
                 item(key = "custom") {
@@ -254,12 +347,10 @@ private fun EqualizerCard(settings: SettingsState, onChange: ((SettingsState) ->
                 )
             }
         }
-
-        EqHeadroomRow(settings = settings, onChange = onChange)
     }
 }
 
-/** The recessed "screen" that draws the frequency response through the ten bands. */
+/** The flat "screen" that draws the frequency response through the ten bands. */
 @Composable
 private fun EqDisplay(bands: List<Float>, active: Boolean) {
     val neo = LocalNeoColors.current
@@ -268,7 +359,7 @@ private fun EqDisplay(bands: List<Float>, active: Boolean) {
         modifier = Modifier
             .fillMaxWidth()
             .height(116.dp)
-            .neoInset(cornerRadius = 22.dp, elevation = 6.dp)
+            .neoWell(cornerRadius = 18.dp, border = true)
             .drawBehind {
                 val w = size.width
                 val h = size.height
@@ -357,16 +448,11 @@ private fun SoundCard(settings: SettingsState, onChange: ((SettingsState) -> Set
         else -> "R ${(settings.balance * 100f).roundToInt()}%"
     }
     NeoCard(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            NeoIconBadge(icon = NeoIcons.Surround, diameter = 46.dp)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(text = "Sound shaping", color = neo.textPrimary, style = NeoType.heading)
-                }
-                Text(text = "Drag a knob up or down to turn it", color = neo.textSecondary, style = NeoType.caption)
-            }
-        }
+        CardHeader(
+            icon = NeoIcons.Surround,
+            title = "Sound shaping",
+            subtitle = "Drag a knob up or down to turn it",
+        )
         Spacer(Modifier.height(20.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -391,7 +477,9 @@ private fun SoundCard(settings: SettingsState, onChange: ((SettingsState) -> Set
                 valueText = "${(settings.stereoWidth * 200f).roundToInt()}%",
             )
         }
-        Spacer(Modifier.height(22.dp))
+        Spacer(Modifier.height(18.dp))
+        NeoDivider()
+        Spacer(Modifier.height(14.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = "Balance",
@@ -432,32 +520,18 @@ private fun SleepTimerCard(timer: SleepTimerState?, onSelect: (Int) -> Unit) {
         value = 0L
     }
     NeoCard(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            NeoIconBadge(icon = NeoIcons.Sleep, diameter = 46.dp)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = "Sleep timer", color = neo.textPrimary, style = NeoType.heading)
-                Text(
-                    text = if (timer != null) "Pauses in ${formatDuration(remainingMs)}" else "Pause playback automatically",
-                    color = if (timer != null) neo.accent else neo.textSecondary,
-                    style = NeoType.caption,
-                )
-            }
-        }
-        Spacer(Modifier.height(4.dp))
-        LazyRow(
-            modifier = Modifier.bleedHorizontally(18.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 14.dp),
-        ) {
-            items(SleepChoices, key = { it }) { minutes ->
-                NeoChip(
-                    text = if (minutes == 0) "Off" else "$minutes min",
-                    selected = (timer?.totalMinutes ?: 0) == minutes,
-                    onClick = { onSelect(minutes) },
-                )
-            }
-        }
+        CardHeader(
+            icon = NeoIcons.Sleep,
+            title = "Sleep timer",
+            subtitle = if (timer != null) "Pauses in ${formatDuration(remainingMs)}" else "Minutes until playback pauses",
+            subtitleColor = if (timer != null) neo.accent else Color.Unspecified,
+        )
+        Spacer(Modifier.height(16.dp))
+        NeoSegmented(
+            options = SleepChoices.map { if (it == 0) "Off" else "$it" },
+            selectedIndex = SleepChoices.indexOf(timer?.totalMinutes ?: 0).coerceAtLeast(0),
+            onSelect = { index -> onSelect(SleepChoices[index]) },
+        )
     }
 }
 
@@ -467,26 +541,19 @@ private fun SleepTimerCard(timer: SleepTimerState?, onSelect: (Int) -> Unit) {
 private fun SignalCard(state: NowPlayingUiState) {
     val neo = LocalNeoColors.current
     NeoCard(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            NeoIconBadge(icon = NeoIcons.HiRes, diameter = 46.dp)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = "Signal", color = neo.textPrimary, style = NeoType.heading)
-                Text(
-                    text = if (state.hasTrack) state.title.ifBlank { "Unknown title" } else "Nothing playing",
-                    color = neo.textSecondary,
-                    style = NeoType.caption,
-                    maxLines = 1,
-                )
-            }
+        CardHeader(
+            icon = NeoIcons.HiRes,
+            title = "Signal",
+            subtitle = if (state.hasTrack) state.title.ifBlank { "Unknown title" } else "Nothing playing",
+        ) {
             if (state.hasTrack && isHiRes(state.bitDepth, state.sampleRateHz)) NeoHiResTag()
         }
         Spacer(Modifier.height(16.dp))
-        NeoInsetPanel(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp, elevation = 5.dp) {
+        NeoInsetPanel(modifier = Modifier.fillMaxWidth(), cornerRadius = 18.dp) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
             ) {
                 val khz = state.sampleRateHz / 1000f
                 val rate = when {
@@ -513,6 +580,7 @@ private fun SignalCard(state: NowPlayingUiState) {
                     color = neo.textPrimary,
                     style = NeoType.caption,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
             }

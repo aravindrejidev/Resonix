@@ -40,7 +40,6 @@ import com.resonix.player.ui.SortKey
 import com.resonix.player.ui.components.FolderRow
 import com.resonix.player.ui.components.HomeMenu
 import com.resonix.player.ui.components.TrackRow
-import com.resonix.player.ui.neo.NeoCard
 import com.resonix.player.ui.neo.NeoChip
 import com.resonix.player.ui.neo.NeoIconBadge
 import com.resonix.player.ui.neo.NeoIconButton
@@ -50,7 +49,7 @@ import com.resonix.player.ui.neo.NeoPillButton
 import com.resonix.player.ui.neo.NeoSectionLabel
 import com.resonix.player.ui.neo.bleedHorizontally
 import com.resonix.player.ui.neo.formatTotalTime
-import com.resonix.player.ui.neo.neoInset
+import com.resonix.player.ui.neo.neoWell
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
 
@@ -200,18 +199,18 @@ fun HomeScreen(
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = bottomInset),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(start = 10.dp, end = 10.dp, top = 8.dp, bottom = bottomInset),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         if (busy) {
-                            item(key = "busy") { ScanBanner() }
+                            item(key = "busy") { Box(Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) { ScanBanner() } }
                         }
                         if (sources.size > 1) {
                             item(key = "sources") {
                                 LazyRow(
-                                    modifier = Modifier.bleedHorizontally(20.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+                                    modifier = Modifier.bleedHorizontally(10.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
                                 ) {
                                     items(sources, key = { it.key }) { source ->
                                         NeoChip(
@@ -230,18 +229,14 @@ fun HomeScreen(
                             }
                         }
                         item(key = "summary") {
-                            val breadcrumb = if (path.isEmpty()) rootLabel else "$rootLabel › ${path.replace("/", " › ")}"
-                            FolderSummaryCard(
-                                breadcrumb = breadcrumb,
-                                songCount = result.totalSongs,
-                                folderCount = result.folders.size,
+                            PlayShuffleRow(
                                 canPlay = songs.isNotEmpty(),
                                 onPlay = { onPlayFolder(activeKey ?: "", path, false) },
                                 onShuffle = { onPlayFolder(activeKey ?: "", path, true) },
                             )
                         }
                         if (result.folders.isNotEmpty()) {
-                            item(key = "folders-label") { NeoSectionLabel("Folders") }
+                            item(key = "folders-label") { NeoSectionLabel("Folders", Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp)) }
                             items(result.folders, key = { "folder:" + it.path }) { entry ->
                                 FolderRow(
                                     name = entry.name,
@@ -251,7 +246,7 @@ fun HomeScreen(
                             }
                         }
                         if (songs.isNotEmpty()) {
-                            item(key = "songs-label") { NeoSectionLabel("Songs") }
+                            item(key = "songs-label") { NeoSectionLabel("Songs", Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp)) }
                             items(songs, key = { it.contentUri }) { track ->
                                 TrackRow(
                                     track = track,
@@ -323,7 +318,7 @@ private fun HomeHeader(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AnimatedVisibility(visible = canGoUp) {
@@ -358,64 +353,40 @@ private fun HomeHeader(
             )
         }
         Spacer(Modifier.width(12.dp))
-        NeoIconButton(icon = NeoIcons.Search, onClick = onSearch, contentDescription = "Search")
-        Spacer(Modifier.width(12.dp))
-        NeoIconButton(icon = NeoIcons.More, onClick = onMore, contentDescription = "More options")
+        NeoIconButton(icon = NeoIcons.Search, onClick = onSearch, contentDescription = "Search", diameter = 44.dp)
+        Spacer(Modifier.width(8.dp))
+        NeoIconButton(icon = NeoIcons.More, onClick = onMore, contentDescription = "More options", diameter = 44.dp)
     }
 }
 
+/** Play the whole folder in order, or shuffled. */
 @Composable
-private fun FolderSummaryCard(
-    breadcrumb: String,
-    songCount: Int,
-    folderCount: Int,
+private fun PlayShuffleRow(
     canPlay: Boolean,
     onPlay: () -> Unit,
     onShuffle: () -> Unit,
 ) {
-    val neo = LocalNeoColors.current
-    val stats = buildString {
-        append(if (songCount == 1) "1 song" else "$songCount songs")
-        if (folderCount > 0) append(" · ").append(if (folderCount == 1) "1 folder" else "$folderCount folders")
-    }
-    NeoCard(
-        modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 30.dp,
-        elevation = 9.dp,
-        contentPadding = PaddingValues(18.dp),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            NeoIconBadge(icon = NeoIcons.FolderOpen, diameter = 52.dp)
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = breadcrumb,
-                    color = neo.textPrimary,
-                    style = NeoType.heading,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(text = stats, color = neo.textSecondary, style = NeoType.caption, maxLines = 1)
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            NeoPillButton(
-                text = "Play",
-                onClick = onPlay,
-                modifier = Modifier.weight(1f),
-                icon = NeoIcons.Play,
-                accent = true,
-                enabled = canPlay,
-            )
-            NeoPillButton(
-                text = "Shuffle",
-                onClick = onShuffle,
-                modifier = Modifier.weight(1f),
-                icon = NeoIcons.Shuffle,
-                enabled = canPlay,
-            )
-        }
+        NeoPillButton(
+            text = "Play",
+            onClick = onPlay,
+            modifier = Modifier.weight(1f),
+            icon = NeoIcons.Play,
+            accent = true,
+            enabled = canPlay,
+        )
+        NeoPillButton(
+            text = "Shuffle",
+            onClick = onShuffle,
+            modifier = Modifier.weight(1f),
+            icon = NeoIcons.Shuffle,
+            enabled = canPlay,
+        )
     }
 }
 
@@ -425,7 +396,7 @@ private fun ScanBanner() {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .neoInset(cornerRadius = 22.dp, elevation = 4.dp)
+            .neoWell(cornerRadius = 20.dp)
             .padding(horizontal = 18.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -455,7 +426,7 @@ private fun EmptyLibrary(
                 .padding(8.dp)
                 .width(132.dp)
                 .height(132.dp)
-                .neoInset(cornerRadius = 66.dp, elevation = 8.dp),
+                .neoWell(cornerRadius = 66.dp),
             contentAlignment = Alignment.Center,
         ) {
             if (busy) {

@@ -1,22 +1,20 @@
 package com.resonix.player.ui.components
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,15 +35,13 @@ import com.resonix.player.ui.neo.NeoQualityPill
 import com.resonix.player.ui.neo.formatDuration
 import com.resonix.player.ui.neo.formatQualityLabel
 import com.resonix.player.ui.neo.isHiRes
-import com.resonix.player.ui.neo.neoInset
-import com.resonix.player.ui.neo.neoSurface
 import com.resonix.player.ui.neo.rememberHaptic
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
 
 /**
- * One song in a list. A resting row is raised; the song that is loaded sits pressed in with an
- * accent title and bouncing bars.
+ * One song in a list. Rows are flat — no card per song, so a long list stays calm. The song that
+ * is loaded gets a faint accent tint, an accent title and bouncing bars.
  */
 @Composable
 fun TrackRow(
@@ -61,10 +57,13 @@ fun TrackRow(
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val haptic = rememberHaptic()
-    val depth = animateFloatAsState(
-        targetValue = if (isCurrent || pressed) 1f else 0f,
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 500f),
-        label = "trackRowDepth",
+    val rowColor by animateColorAsState(
+        targetValue = when {
+            isCurrent -> neo.accent.copy(alpha = 0.10f)
+            pressed -> neo.textPrimary.copy(alpha = 0.06f)
+            else -> neo.accent.copy(alpha = 0f)
+        },
+        label = "trackRowColor",
     )
     val titleColor by animateColorAsState(
         targetValue = if (isCurrent) neo.accent else neo.textPrimary,
@@ -78,26 +77,19 @@ fun TrackRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .neoSurface(cornerRadius = 24.dp, elevation = 5.dp, depth = { depth.value })
+            .background(rowColor, RoundedCornerShape(18.dp))
             .clickable(interactionSource = source, indication = null, role = Role.Button) {
                 haptic()
                 onClick()
             }
-            .padding(horizontal = 12.dp, vertical = 11.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .neoInset(cornerRadius = 18.dp, elevation = 3.dp)
-                .padding(4.dp),
-        ) {
-            NeoAlbumArt(
-                uri = if (showArt) track.albumArtUri.ifBlank { track.contentUri } else "",
-                modifier = Modifier.fillMaxSize(),
-                cornerRadius = 14.dp,
-            )
-        }
+        NeoAlbumArt(
+            uri = if (showArt) track.albumArtUri.ifBlank { track.contentUri } else "",
+            modifier = Modifier.size(54.dp),
+            cornerRadius = 12.dp,
+        )
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -116,7 +108,7 @@ fun TrackRow(
             )
             val quality = formatQualityLabel(track.format, track.bitDepth, track.sampleRateHz)
             if (showBadge && quality.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(5.dp))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -140,7 +132,7 @@ fun TrackRow(
     }
 }
 
-/** A sub-folder inside the folder being browsed. */
+/** A sub-folder inside the folder being browsed. Flat, like the song rows. */
 @Composable
 fun FolderRow(
     name: String,
@@ -152,23 +144,22 @@ fun FolderRow(
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val haptic = rememberHaptic()
-    val depth = animateFloatAsState(
-        targetValue = if (pressed) 1f else 0f,
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 500f),
-        label = "folderRowDepth",
+    val rowColor by animateColorAsState(
+        targetValue = if (pressed) neo.textPrimary.copy(alpha = 0.06f) else neo.textPrimary.copy(alpha = 0f),
+        label = "folderRowColor",
     )
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .neoSurface(cornerRadius = 24.dp, elevation = 5.dp, depth = { depth.value })
+            .background(rowColor, RoundedCornerShape(18.dp))
             .clickable(interactionSource = source, indication = null, role = Role.Button) {
                 haptic()
                 onClick()
             }
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        NeoIconBadge(icon = NeoIcons.Folder, diameter = 48.dp)
+        NeoIconBadge(icon = NeoIcons.Folder, diameter = 54.dp)
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(

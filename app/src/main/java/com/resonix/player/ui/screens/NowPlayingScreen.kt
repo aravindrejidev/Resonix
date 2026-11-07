@@ -83,8 +83,7 @@ import com.resonix.player.ui.neo.NeoSlider
 import com.resonix.player.ui.neo.formatDuration
 import com.resonix.player.ui.neo.isHiRes
 import com.resonix.player.ui.neo.neoBackground
-import com.resonix.player.ui.neo.neoInset
-import com.resonix.player.ui.neo.neoRaised
+import com.resonix.player.ui.neo.neoFloating
 import com.resonix.player.ui.neo.rememberHaptic
 import com.resonix.player.ui.rememberAlbumArt
 import com.resonix.player.ui.theme.LocalNeoColors
@@ -502,15 +501,12 @@ private fun FramedLayout(c: PlayerControls) {
                         scaleX = artScale
                         scaleY = artScale
                     }
-                    .neoRaised(cornerRadius = 40.dp, elevation = 14.dp)
-                    .padding(14.dp)
-                    .neoInset(cornerRadius = 28.dp, elevation = 6.dp)
-                    .padding(6.dp),
+                    .neoFloating(cornerRadius = 28.dp, elevation = 18.dp),
             ) {
                 NeoAlbumArt(
                     uri = state.albumArtUri.ifBlank { state.contentUri },
                     modifier = Modifier.fillMaxSize(),
-                    cornerRadius = 22.dp,
+                    cornerRadius = 28.dp,
                     sizePx = 1024,
                     iconSize = 72.dp,
                 )

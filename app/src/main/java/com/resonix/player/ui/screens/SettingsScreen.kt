@@ -5,11 +5,10 @@ import android.os.Build
 import android.provider.Settings
 import androidx.compose.animation.Crossfade
 import androidx.activity.ComponentActivity
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -72,7 +71,6 @@ import com.resonix.player.ui.neo.NeoSegmented
 import com.resonix.player.ui.neo.NeoSlider
 import com.resonix.player.ui.neo.NeoSwitch
 import com.resonix.player.ui.neo.formatRelativeTime
-import com.resonix.player.ui.neo.neoSurface
 import com.resonix.player.ui.neo.rememberHaptic
 import com.resonix.player.ui.theme.AccentColor
 import com.resonix.player.ui.theme.LocalNeoColors
@@ -228,8 +226,8 @@ private fun SettingsHome(
             .fillMaxSize()
             .verticalScroll(scrollState)
             .statusBarsPadding()
-            .padding(start = 22.dp, end = 22.dp, bottom = bottomInset),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
+            .padding(start = 20.dp, end = 20.dp, bottom = bottomInset),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
         ScreenHeader(title = "Settings", subtitle = "Make Resonix yours")
 
@@ -287,8 +285,8 @@ private fun SettingsDetail(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .statusBarsPadding()
-            .padding(start = 22.dp, end = 22.dp, bottom = bottomInset),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
+            .padding(start = 20.dp, end = 20.dp, bottom = bottomInset),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
         Row(
             modifier = Modifier
@@ -627,7 +625,7 @@ private fun AboutSection(versionName: String) {
 
 @Composable
 private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         NeoSectionLabel(title)
         NeoCard(
             modifier = Modifier.fillMaxWidth(),
@@ -639,7 +637,8 @@ private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> 
 
 @Composable
 private fun SettingsDivider() {
-    NeoDivider(Modifier.padding(horizontal = 18.dp))
+    // Starts under the text (4 + 14 + 42 + 14 dp in), like a list, and ends at the card's padding.
+    NeoDivider(Modifier.padding(start = 74.dp, end = 18.dp))
 }
 
 /** Icon badge, title / subtitle, optional trailing control. Tappable when [onClick] is given. */
@@ -669,7 +668,7 @@ private fun SettingRow(
             .padding(horizontal = 4.dp)
             .background(
                 color = if (pressed) neo.accent.copy(alpha = 0.08f) else Color.Transparent,
-                shape = RoundedCornerShape(24.dp),
+                shape = RoundedCornerShape(18.dp),
             )
             .then(clickModifier)
             .padding(horizontal = 14.dp, vertical = 12.dp),
@@ -826,16 +825,11 @@ private fun AccentRow(selected: AccentColor, onSelect: (AccentColor) -> Unit) {
 private fun AccentSwatch(color: Color, selected: Boolean, label: String, onClick: () -> Unit) {
     val haptic = rememberHaptic()
     val source = remember { MutableInteractionSource() }
-    val depth = animateFloatAsState(
-        targetValue = if (selected) 1f else 0f,
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 500f),
-        label = "accentSwatchDepth",
-    )
     val onColor = if (color.luminance() > 0.45f) Color(0xFF14171C) else Color.White
     Box(
         modifier = Modifier
-            .size(50.dp)
-            .neoSurface(cornerRadius = 25.dp, elevation = 4.dp, depth = { depth.value })
+            .size(48.dp)
+            .border(2.dp, if (selected) color else Color.Transparent, CircleShape)
             .clickable(interactionSource = source, indication = null, role = Role.RadioButton) {
                 haptic()
                 onClick()
@@ -844,7 +838,7 @@ private fun AccentSwatch(color: Color, selected: Boolean, label: String, onClick
     ) {
         Box(
             modifier = Modifier
-                .size(26.dp)
+                .size(34.dp)
                 .background(color, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
@@ -853,7 +847,7 @@ private fun AccentSwatch(color: Color, selected: Boolean, label: String, onClick
                     imageVector = NeoIcons.Check,
                     contentDescription = label,
                     tint = onColor,
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(18.dp),
                 )
             }
         }

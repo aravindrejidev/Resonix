@@ -13,6 +13,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -113,7 +114,7 @@ fun rememberHaptic(): () -> Unit {
 
 // ───────────────────────────── buttons ─────────────────────────────
 
-/** Round raised button. Presses in while held; [toggled] keeps it pressed in with an accent icon. */
+/** Round flat button. Shrinks a little while held; [toggled] tints it with the accent colour. */
 @Composable
 fun NeoIconButton(
     icon: ImageVector,
@@ -129,10 +130,18 @@ fun NeoIconButton(
     val neo = LocalNeoColors.current
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
-    val depth = animateFloatAsState(
-        targetValue = if ((pressed && enabled) || toggled) 1f else 0f,
+    val press = animateFloatAsState(
+        targetValue = if (pressed && enabled) 1f else 0f,
         animationSpec = spring(dampingRatio = 0.8f, stiffness = 600f),
-        label = "neoIconDepth",
+        label = "neoIconPress",
+    )
+    val fill by animateColorAsState(
+        targetValue = when {
+            toggled -> neo.accent.copy(alpha = 0.16f)
+            pressed && enabled -> neo.well
+            else -> neo.card
+        },
+        label = "neoIconFill",
     )
     val haptic = rememberHaptic()
     val iconColor = when {
@@ -144,11 +153,13 @@ fun NeoIconButton(
     Box(
         modifier = modifier
             .size(diameter)
-            .neoSurface(
-                cornerRadius = diameter / 2,
-                elevation = if (diameter >= 56.dp) 6.dp else 4.dp,
-                depth = { depth.value },
-            )
+            .graphicsLayer {
+                val scale = 1f - 0.06f * press.value
+                scaleX = scale
+                scaleY = scale
+            }
+            .background(fill, CircleShape)
+            .border(1.dp, if (toggled) neo.accent.copy(alpha = 0.45f) else neo.outline, CircleShape)
             .clickable(interactionSource = source, indication = null, enabled = enabled, role = Role.Button) {
                 haptic()
                 onClick()
@@ -193,7 +204,7 @@ fun NeoAccentIconButton(
                 scaleX = s
                 scaleY = s
             }
-            .neoAccentSurface(cornerRadius = diameter / 2, glow = diameter * 0.24f, press = { press.value })
+            .neoAccentSurface(cornerRadius = diameter / 2, glow = diameter * 0.14f, press = { press.value })
             .clickable(interactionSource = source, indication = null, role = Role.Button) {
                 haptic()
                 onClick()
@@ -237,9 +248,12 @@ fun NeoPillButton(
         else -> neo.textPrimary
     }
     val surface = if (accent && enabled) {
-        Modifier.neoAccentSurface(cornerRadius = buttonHeight / 2, glow = 12.dp, press = { press.value })
+        Modifier.neoAccentSurface(cornerRadius = buttonHeight / 2, glow = 7.dp, press = { press.value })
     } else {
-        Modifier.neoSurface(cornerRadius = buttonHeight / 2, elevation = 5.dp, depth = { press.value })
+        Modifier.neoFlat(
+            cornerRadius = buttonHeight / 2,
+            fill = if (pressed && enabled) neo.well else Color.Unspecified,
+        )
     }
     Row(
         modifier = modifier
@@ -268,7 +282,7 @@ fun NeoPillButton(
 
 // ───────────────────────────── switch / segmented / chip ─────────────────────────────
 
-/** Inset track with a raised thumb that slides across and lights up. */
+/** Flat track that fills with the accent colour when on, with a small thumb that slides across. */
 @Composable
 fun NeoSwitch(
     checked: Boolean,
@@ -281,15 +295,24 @@ fun NeoSwitch(
     val source = remember { MutableInteractionSource() }
     val progress = animateFloatAsState(
         targetValue = if (checked) 1f else 0f,
-        animationSpec = spring(dampingRatio = 0.7f, stiffness = 500f),
+        animationSpec = spring(dampingRatio = 0.75f, stiffness = 500f),
         label = "neoSwitch",
     )
-    val travel = with(LocalDensity.current) { 26.dp.toPx() }
+    val trackColor by animateColorAsState(
+        targetValue = if (checked) neo.accent else neo.well,
+        label = "neoSwitchTrack",
+    )
+    val thumbColor by animateColorAsState(
+        targetValue = if (checked) Color.White else if (neo.isDark) Color(0xFF8A93A6) else Color.White,
+        label = "neoSwitchThumb",
+    )
+    val travel = with(LocalDensity.current) { 22.dp.toPx() }
     Box(
         modifier = modifier
-            .size(width = 58.dp, height = 32.dp)
-            .neoInset(cornerRadius = 16.dp, elevation = 3.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .size(width = 52.dp, height = 30.dp)
+            .background(trackColor, RoundedCornerShape(15.dp))
+            .border(1.dp, if (checked) Color.Transparent else neo.outline, RoundedCornerShape(15.dp))
+            .clip(RoundedCornerShape(15.dp))
             .clickable(interactionSource = source, indication = null, enabled = enabled, role = Role.Switch) {
                 haptic()
                 onCheckedChange(!checked)
@@ -300,24 +323,20 @@ fun NeoSwitch(
             modifier = Modifier
                 .offset { IntOffset((progress.value * travel).roundToInt(), 0) }
                 .padding(4.dp)
-                .size(24.dp)
-                .neoRaised(cornerRadius = 12.dp, elevation = 3.dp)
-                .drawBehind {
-                    drawCircle(color = neo.textTertiary.copy(alpha = 0.55f * (1f - progress.value)), radius = 3.dp.toPx())
-                    drawCircle(color = neo.accent, radius = 5.dp.toPx(), alpha = progress.value)
-                },
+                .size(22.dp)
+                .neoThumb(cornerRadius = 11.dp, elevation = 2.dp, fill = thumbColor),
         )
     }
 }
 
-/** Inset track with a raised "thumb" that slides under the selected option. */
+/** Flat track with a small raised thumb that slides under the selected option. */
 @Composable
 fun NeoSegmented(
     options: List<String>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    segmentHeight: Dp = 46.dp,
+    segmentHeight: Dp = 42.dp,
 ) {
     val neo = LocalNeoColors.current
     val haptic = rememberHaptic()
@@ -335,7 +354,7 @@ fun NeoSegmented(
         modifier = modifier
             .fillMaxWidth()
             .height(segmentHeight)
-            .neoInset(cornerRadius = segmentHeight / 2, elevation = 4.dp)
+            .neoWell(cornerRadius = segmentHeight / 2)
             .onSizeChanged { widthPx = it.width }
             .clip(RoundedCornerShape(segmentHeight / 2))
             .padding(pad),
@@ -346,7 +365,7 @@ fun NeoSegmented(
                     .offset { IntOffset((index.value * cellWidthPx).roundToInt(), 0) }
                     .width(with(density) { cellWidthPx.toDp() })
                     .fillMaxHeight()
-                    .neoRaised(cornerRadius = (segmentHeight - pad * 2) / 2, elevation = 3.dp),
+                    .neoThumb(cornerRadius = (segmentHeight - pad * 2) / 2, elevation = 2.dp),
             )
         }
         Row(modifier = Modifier.fillMaxSize()) {
@@ -384,7 +403,7 @@ fun NeoSegmented(
     }
 }
 
-/** Small pill — raised when idle, pressed in when [selected]. */
+/** Small pill — flat when idle, tinted with the accent colour when [selected]. */
 @Composable
 fun NeoChip(
     text: String,
@@ -397,21 +416,30 @@ fun NeoChip(
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val haptic = rememberHaptic()
-    val depth = animateFloatAsState(
-        targetValue = if (selected || pressed) 1f else 0f,
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 600f),
-        label = "neoChip",
+    val fill by animateColorAsState(
+        targetValue = when {
+            selected -> neo.accent.copy(alpha = 0.16f)
+            pressed -> neo.well
+            else -> neo.card
+        },
+        label = "neoChipFill",
+    )
+    val edge by animateColorAsState(
+        targetValue = if (selected) neo.accent.copy(alpha = 0.55f) else neo.outline,
+        label = "neoChipEdge",
     )
     val contentColor = if (selected) neo.accent else neo.textSecondary
+    val shape = RoundedCornerShape(18.dp)
     Row(
         modifier = modifier
-            .height(38.dp)
-            .neoSurface(cornerRadius = 19.dp, elevation = 4.dp, depth = { depth.value })
+            .height(36.dp)
+            .background(fill, shape)
+            .border(1.dp, edge, shape)
             .clickable(interactionSource = source, indication = null, role = Role.Button) {
                 haptic()
                 onClick()
             }
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 15.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -429,32 +457,35 @@ fun NeoChip(
 
 // ───────────────────────────── containers ─────────────────────────────
 
-/** Large raised card — the building block of the Tools and Settings screens. */
+/**
+ * Flat card — the building block of the Tools and Settings screens. A lighter fill and a hairline
+ * edge, no shadow. [elevation] is kept so existing callers still compile; it has no effect.
+ */
 @Composable
 fun NeoCard(
     modifier: Modifier = Modifier,
-    cornerRadius: Dp = 28.dp,
-    elevation: Dp = 8.dp,
+    cornerRadius: Dp = 24.dp,
+    @Suppress("UNUSED_PARAMETER") elevation: Dp = 0.dp,
     contentPadding: PaddingValues = PaddingValues(20.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
         modifier = modifier
-            .neoRaised(cornerRadius = cornerRadius, elevation = elevation)
+            .neoFlat(cornerRadius = cornerRadius)
             .padding(contentPadding),
         content = content,
     )
 }
 
-/** Recessed display area (EQ screen, wells). */
+/** Flat recessed display area (EQ screen, wells). [elevation] has no effect; kept for old callers. */
 @Composable
 fun NeoInsetPanel(
     modifier: Modifier = Modifier,
-    cornerRadius: Dp = 22.dp,
-    elevation: Dp = 6.dp,
+    cornerRadius: Dp = 20.dp,
+    @Suppress("UNUSED_PARAMETER") elevation: Dp = 0.dp,
     content: @Composable () -> Unit,
 ) {
-    Box(modifier = modifier.neoInset(cornerRadius = cornerRadius, elevation = elevation)) {
+    Box(modifier = modifier.neoWell(cornerRadius = cornerRadius, border = true)) {
         content()
     }
 }
@@ -467,23 +498,19 @@ fun NeoSectionLabel(text: String, modifier: Modifier = Modifier) {
         text = text.uppercase(),
         color = neo.textTertiary,
         style = NeoType.overline,
-        modifier = modifier.padding(horizontal = 6.dp),
+        modifier = modifier.padding(horizontal = 4.dp),
     )
 }
 
-/** An engraved hairline: a dark line with a light line directly beneath it. */
+/** A thin rule between rows. */
 @Composable
 fun NeoDivider(modifier: Modifier = Modifier) {
     val neo = LocalNeoColors.current
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(2.dp)
-            .drawBehind {
-                val t = 1.dp.toPx()
-                drawLine(neo.shadowDark.copy(alpha = 0.55f), Offset(0f, t * 0.5f), Offset(size.width, t * 0.5f), strokeWidth = t)
-                drawLine(neo.shadowLight.copy(alpha = 0.90f), Offset(0f, t * 1.5f), Offset(size.width, t * 1.5f), strokeWidth = t)
-            },
+            .height(1.dp)
+            .background(neo.divider),
     )
 }
 
@@ -500,7 +527,7 @@ fun Modifier.neoBackground(): Modifier {
 
 // ───────────────────────────── small pieces ─────────────────────────────
 
-/** Inset circle holding an accent-coloured icon — leading icon of every settings row. */
+/** Soft tinted tile holding an accent-coloured icon — leading icon of every settings row. */
 @Composable
 fun NeoIconBadge(
     icon: ImageVector,
@@ -509,14 +536,17 @@ fun NeoIconBadge(
     tint: Color = Color.Unspecified,
 ) {
     val neo = LocalNeoColors.current
+    val iconTint = if (tint == Color.Unspecified) neo.accent else tint
     Box(
-        modifier = modifier.size(diameter).neoInset(cornerRadius = diameter / 2, elevation = 3.dp),
+        modifier = modifier
+            .size(diameter)
+            .background(iconTint.copy(alpha = 0.13f), RoundedCornerShape(diameter * 0.32f)),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = if (tint == Color.Unspecified) neo.accent else tint,
+            tint = iconTint,
             modifier = Modifier.size(diameter * 0.5f),
         )
     }
@@ -529,7 +559,7 @@ fun NeoQualityPill(text: String, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .height(20.dp)
-            .background(neo.shadowDark.copy(alpha = if (neo.isDark) 0.45f else 0.28f), RoundedCornerShape(10.dp))
+            .background(neo.well, RoundedCornerShape(10.dp))
             .padding(horizontal = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -537,20 +567,20 @@ fun NeoQualityPill(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** Glowing accent tag for anything above CD quality. */
+/** Accent tag for anything above CD quality. */
 @Composable
 fun NeoHiResTag(modifier: Modifier = Modifier) {
     val neo = LocalNeoColors.current
     Box(
         modifier = modifier
             .height(20.dp)
-            .neoAccentSurface(cornerRadius = 10.dp, glow = 6.dp)
+            .background(neo.accent.copy(alpha = 0.16f), RoundedCornerShape(10.dp))
             .padding(horizontal = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = "HI-RES",
-            color = neo.onAccent,
+            color = neo.accent,
             style = NeoType.tiny.copy(fontWeight = FontWeight.ExtraBold, letterSpacing = 0.8.sp),
             maxLines = 1,
         )
@@ -691,7 +721,7 @@ fun NeoAlbumArt(
 
 // ───────────────────────────── search field ─────────────────────────────
 
-/** Inset pill search field with a clear button. */
+/** Flat pill search field with a clear button. */
 @Composable
 fun NeoSearchField(
     query: String,
@@ -715,9 +745,9 @@ fun NeoSearchField(
     }
     Row(
         modifier = modifier
-            .height(52.dp)
-            .neoInset(cornerRadius = 26.dp, elevation = 4.dp)
-            .padding(horizontal = 18.dp),
+            .height(48.dp)
+            .neoWell(cornerRadius = 24.dp, border = true)
+            .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(

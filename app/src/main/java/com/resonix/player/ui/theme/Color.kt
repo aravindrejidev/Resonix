@@ -53,6 +53,23 @@ class NeoColors(
 
     /** Hairline highlight along the top-left edge of raised surfaces. */
     val edgeLight: Color get() = Color.White.copy(alpha = if (isDark) 0.10f else 0.90f)
+
+    // ── Flat layer: surfaces told apart by tone and a hairline instead of shadows ──
+
+    /** Fill of a card or control: a touch lighter than the screen behind it. */
+    val card: Color get() = lerp(surface, Color.White, if (isDark) 0.045f else 0.50f)
+
+    /** Fill of anything recessed (tracks, displays, badges): a touch darker than the screen. */
+    val well: Color get() = lerp(surface, Color.Black, if (isDark) 0.20f else 0.055f)
+
+    /** Hairline around cards and controls. */
+    val outline: Color get() = if (isDark) Color.White.copy(alpha = 0.07f) else Color(0xFF2A3042).copy(alpha = 0.09f)
+
+    /** Thin rule between rows inside one card. */
+    val divider: Color get() = if (isDark) Color.White.copy(alpha = 0.07f) else Color(0xFF2A3042).copy(alpha = 0.10f)
+
+    /** Fill of a thumb / knob that sits on top of a track. */
+    val thumb: Color get() = if (isDark) lerp(surface, Color.White, 0.16f) else Color.White
 }
 
 fun neoColors(dark: Boolean, accent: AccentColor): NeoColors {

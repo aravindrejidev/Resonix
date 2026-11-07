@@ -3,6 +3,7 @@ package com.resonix.player.ui.components
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,8 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.resonix.player.ui.neo.NeoIcons
-import com.resonix.player.ui.neo.neoInset
-import com.resonix.player.ui.neo.neoRaised
+import com.resonix.player.ui.neo.neoFloating
 import com.resonix.player.ui.neo.rememberHaptic
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
@@ -55,7 +56,7 @@ enum class NavTab(val label: String) {
 }
 
 /**
- * Floating pill that holds the main navigation. The selected tab sits in a pressed-in well that
+ * Floating pill that holds the main navigation. The selected tab sits on a soft accent tint that
  * slides between tabs with a little spring.
  */
 @Composable
@@ -64,6 +65,7 @@ fun FloatingNavBar(
     onSelect: (NavTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val neo = LocalNeoColors.current
     val density = LocalDensity.current
     val haptic = rememberHaptic()
     val tabs = NavTab.entries
@@ -79,8 +81,8 @@ fun FloatingNavBar(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(74.dp)
-            .neoRaised(cornerRadius = 37.dp, elevation = 9.dp)
+            .height(68.dp)
+            .neoFloating(cornerRadius = 34.dp, elevation = 12.dp)
             .onSizeChanged { barWidthPx = it.width },
     ) {
         if (cellPx > 0f) {
@@ -88,8 +90,8 @@ fun FloatingNavBar(
                 modifier = Modifier
                     .offset { IntOffset((padPx + cellPx * position.value).roundToInt(), padPx.roundToInt()) }
                     .width(with(density) { cellPx.toDp() })
-                    .height(58.dp)
-                    .neoInset(cornerRadius = 29.dp, elevation = 4.dp),
+                    .height(52.dp)
+                    .background(neo.accent.copy(alpha = 0.14f), RoundedCornerShape(26.dp)),
             )
         }
         Row(
@@ -138,8 +140,8 @@ private fun NavItem(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(imageVector = tab.icon, contentDescription = tab.label, tint = color, modifier = Modifier.size(24.dp))
-        Spacer(Modifier.height(3.dp))
+        Icon(imageVector = tab.icon, contentDescription = tab.label, tint = color, modifier = Modifier.size(23.dp))
+        Spacer(Modifier.height(2.dp))
         Text(
             text = tab.label,
             color = color,

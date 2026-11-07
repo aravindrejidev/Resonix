@@ -49,7 +49,7 @@ private fun fractionAlong(pos: Float, thumbPx: Float, lengthPx: Int): Float =
     ((pos - thumbPx / 2f) / (lengthPx - thumbPx).coerceAtLeast(1f)).coerceIn(0f, 1f)
 
 /**
- * Horizontal slider: an inset groove, an accent fill and a raised round thumb.
+ * Horizontal slider: a flat groove, an accent fill and a round thumb.
  * [value] is 0..1. With [centered] the fill grows from the middle (balance, gain).
  * [onValueChangeFinished] fires when the finger lifts — use it to seek.
  */
@@ -59,8 +59,8 @@ fun NeoSlider(
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
     onValueChangeFinished: () -> Unit = {},
-    trackHeight: Dp = 12.dp,
-    thumbDiameter: Dp = 28.dp,
+    trackHeight: Dp = 8.dp,
+    thumbDiameter: Dp = 26.dp,
     enabled: Boolean = true,
     centered: Boolean = false,
 ) {
@@ -106,9 +106,9 @@ fun NeoSlider(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(trackHeight)
-                .neoInset(cornerRadius = trackHeight / 2, elevation = 3.dp)
+                .neoWell(cornerRadius = trackHeight / 2)
                 .drawBehind {
-                    val pad = 2.dp.toPx()
+                    val pad = 0f
                     val thumbCenter = thumbPx / 2f + v * travel
                     val origin = if (centered) thumbPx / 2f + 0.5f * travel else 0f
                     val left = minOf(origin, thumbCenter)
@@ -133,11 +133,11 @@ fun NeoSlider(
             modifier = Modifier
                 .offset { IntOffset((v * travel).roundToInt(), 0) }
                 .size(thumbDiameter)
-                .neoRaised(cornerRadius = thumbDiameter / 2, elevation = 4.dp)
+                .neoThumb(cornerRadius = thumbDiameter / 2, elevation = 3.dp)
                 .drawBehind {
                     drawCircle(
                         color = if (enabled) neo.accent else neo.textTertiary,
-                        radius = size.minDimension * 0.16f,
+                        radius = size.minDimension * 0.18f,
                     )
                 },
         )
@@ -200,11 +200,11 @@ fun NeoVerticalSlider(
         // Groove with the centre (0 dB) tick and the accent fill.
         Box(
             modifier = Modifier
-                .width(10.dp)
+                .width(6.dp)
                 .fillMaxHeight()
-                .neoInset(cornerRadius = 5.dp, elevation = 3.dp)
+                .neoWell(cornerRadius = 3.dp)
                 .drawBehind {
-                    val pad = 2.dp.toPx()
+                    val pad = 0f
                     val centerY = capPx / 2f + 0.5f * travel
                     val valueY = capPx / 2f + (1f - v) * travel
                     val top = minOf(centerY, valueY)
@@ -235,7 +235,7 @@ fun NeoVerticalSlider(
             modifier = Modifier
                 .offset { IntOffset(0, ((1f - v) * travel).roundToInt()) }
                 .size(width = capWidth, height = capHeight)
-                .neoRaised(cornerRadius = 8.dp, elevation = 3.dp)
+                .neoThumb(cornerRadius = 8.dp, elevation = 2.dp)
                 .drawBehind {
                     drawLine(
                         color = if (enabled) neo.accent else neo.textTertiary,
@@ -250,7 +250,7 @@ fun NeoVerticalSlider(
 }
 
 /**
- * Rotary knob: an inset ring with an accent arc, and a raised cap with a pointer dot.
+ * Rotary knob: a flat ring with an accent arc, and a cap with a pointer dot.
  * Drag up / down to turn. [value] is 0..1.
  */
 @Composable
@@ -273,7 +273,7 @@ fun NeoKnob(
         Box(
             modifier = Modifier
                 .size(diameter)
-                .neoInset(cornerRadius = diameter / 2, elevation = 5.dp)
+                .neoWell(cornerRadius = diameter / 2)
                 .drawBehind {
                     val stroke = 4.dp.toPx()
                     val inset = 11.dp.toPx()
@@ -312,7 +312,7 @@ fun NeoKnob(
             Box(
                 modifier = Modifier
                     .size(diameter * 0.68f)
-                    .neoRaised(cornerRadius = diameter * 0.34f, elevation = 5.dp),
+                    .neoThumb(cornerRadius = diameter * 0.34f, elevation = 4.dp),
             ) {
                 Box(
                     modifier = Modifier

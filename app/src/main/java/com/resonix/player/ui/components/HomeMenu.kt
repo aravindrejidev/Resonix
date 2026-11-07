@@ -43,7 +43,7 @@ import com.resonix.player.ui.neo.NeoIconBadge
 import com.resonix.player.ui.neo.NeoIconButton
 import com.resonix.player.ui.neo.NeoIcons
 import com.resonix.player.ui.neo.NeoSwitch
-import com.resonix.player.ui.neo.neoRaised
+import com.resonix.player.ui.neo.neoFloating
 import com.resonix.player.ui.neo.rememberHaptic
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
@@ -105,7 +105,7 @@ fun HomeMenu(
                 Column(
                     modifier = Modifier
                         .width(296.dp)
-                        .neoRaised(cornerRadius = 28.dp, elevation = 10.dp)
+                        .neoFloating(cornerRadius = 24.dp, elevation = 16.dp)
                         .heightIn(max = 560.dp)
                         .verticalScroll(rememberScrollState())
                         .padding(vertical = 10.dp)

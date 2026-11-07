@@ -1,15 +1,11 @@
 package com.resonix.player.ui.components
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -32,8 +28,7 @@ import com.resonix.player.ui.NowPlayingUiState
 import com.resonix.player.ui.neo.NeoAlbumArt
 import com.resonix.player.ui.neo.NeoIconButton
 import com.resonix.player.ui.neo.NeoIcons
-import com.resonix.player.ui.neo.neoInset
-import com.resonix.player.ui.neo.neoSurface
+import com.resonix.player.ui.neo.neoFloating
 import com.resonix.player.ui.neo.rememberHaptic
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
@@ -54,12 +49,6 @@ fun MiniPlayer(
     val neo = LocalNeoColors.current
     val haptic = rememberHaptic()
     val source = remember { MutableInteractionSource() }
-    val pressed by source.collectIsPressedAsState()
-    val depth = animateFloatAsState(
-        targetValue = if (pressed) 0.6f else 0f,
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 500f),
-        label = "miniPlayerDepth",
-    )
     val progress = if (state.durationMs > 0L) {
         (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
     } else {
@@ -69,27 +58,20 @@ fun MiniPlayer(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(78.dp)
-            .neoSurface(cornerRadius = 30.dp, elevation = 8.dp, depth = { depth.value })
+            .height(72.dp)
+            .neoFloating(cornerRadius = 26.dp, elevation = 12.dp)
             .clickable(interactionSource = source, indication = null) {
                 haptic()
                 onOpen()
             }
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(54.dp)
-                .neoInset(cornerRadius = 18.dp, elevation = 3.dp)
-                .padding(4.dp),
-        ) {
-            NeoAlbumArt(
-                uri = if (showArt) state.albumArtUri.ifBlank { state.contentUri } else "",
-                modifier = Modifier.fillMaxSize(),
-                cornerRadius = 14.dp,
-            )
-        }
+        NeoAlbumArt(
+            uri = if (showArt) state.albumArtUri.ifBlank { state.contentUri } else "",
+            modifier = Modifier.size(52.dp),
+            cornerRadius = 14.dp,
+        )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(

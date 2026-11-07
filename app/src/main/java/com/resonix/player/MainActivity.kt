@@ -199,7 +199,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     // Room the scrolling screens must leave at the bottom for the floating bar (+ mini player).
     val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val bottomInset: Dp by animateDpAsState(
-        targetValue = navInset + 14.dp + 74.dp + 24.dp + (if (nowPlaying.hasTrack) 78.dp + 12.dp else 0.dp),
+        targetValue = navInset + 14.dp + 68.dp + 24.dp + (if (nowPlaying.hasTrack) 72.dp + 10.dp else 0.dp),
         animationSpec = tween(300),
         label = "bottomInset",
     )
@@ -284,8 +284,8 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                 .widthIn(max = 520.dp)
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(start = 22.dp, end = 22.dp, bottom = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(start = 20.dp, end = 20.dp, bottom = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             AnimatedVisibility(
                 visible = toast != null,

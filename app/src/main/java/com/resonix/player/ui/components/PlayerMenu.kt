@@ -35,7 +35,7 @@ import com.resonix.player.ui.neo.NeoDivider
 import com.resonix.player.ui.neo.NeoIconBadge
 import com.resonix.player.ui.neo.NeoIcons
 import com.resonix.player.ui.neo.NeoSwitch
-import com.resonix.player.ui.neo.neoRaised
+import com.resonix.player.ui.neo.neoFloating
 import com.resonix.player.ui.neo.rememberHaptic
 import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
@@ -89,7 +89,7 @@ fun PlayerMenu(
                 Column(
                     modifier = Modifier
                         .width(300.dp)
-                        .neoRaised(cornerRadius = 28.dp, elevation = 10.dp)
+                        .neoFloating(cornerRadius = 24.dp, elevation = 16.dp)
                         .padding(vertical = 10.dp)
                         // Swallow taps on the panel itself so they don't reach the dismiss layer.
                         .clickable(
