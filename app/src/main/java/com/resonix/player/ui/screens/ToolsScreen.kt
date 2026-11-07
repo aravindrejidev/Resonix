@@ -182,7 +182,11 @@ private fun EqualizerCard(settings: SettingsState, onChange: ((SettingsState) ->
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = "Graphic EQ", color = neo.textPrimary, style = NeoType.heading)
                 Text(
-                    text = if (settings.eqEnabled) settings.eqPreset else "Off",
+                    text = when {
+                        settings.eqEnabled -> settings.eqPreset
+                        settings.peqEnabled -> "Off · Parametric EQ is on"
+                        else -> "Off"
+                    },
                     color = neo.textSecondary,
                     style = NeoType.caption,
                 )

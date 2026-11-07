@@ -127,7 +127,8 @@ fun EqHeadroomRow(
 
 /**
  * The parametric equalizer: up to 16 bands, each a peak, shelf, pass or notch filter with exact
- * frequency, gain and Q. Works together with the graphic equalizer above it (both feed one cascade).
+ * frequency, gain and Q. Only one of the two equalizers is on at a time: switching this one on
+ * turns the graphic equalizer above it off (see AppSettings.update).
  */
 @Composable
 fun ParametricEqCard(
@@ -149,9 +150,9 @@ fun ParametricEqCard(
         }
     }
 
-    // What you hear: the graphic equalizer (when on) plus these bands; shown dimmed while this switch is off.
-    val curveBands = remember(settings.eqEnabled, settings.eqBands, bands) {
-        EqLayout.build(settings.eqEnabled, settings.eqBands, true, bands)
+    // What you hear when this equalizer is on: just these bands; shown dimmed while the switch is off.
+    val curveBands = remember(bands) {
+        EqLayout.build(false, settings.eqBands, true, bands)
     }
 
     NeoCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
@@ -161,7 +162,11 @@ fun ParametricEqCard(
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = "Parametric EQ", color = neo.textPrimary, style = NeoType.heading)
                 Text(
-                    text = if (settings.peqEnabled) "${bands.count { it.enabled }} of ${bands.size} bands on" else "Off",
+                    text = when {
+                        settings.peqEnabled -> "${bands.count { it.enabled }} of ${bands.size} bands on"
+                        settings.eqEnabled -> "Off · Graphic EQ is on"
+                        else -> "Off"
+                    },
                     color = neo.textSecondary,
                     style = NeoType.caption,
                 )

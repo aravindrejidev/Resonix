@@ -111,7 +111,7 @@ data class SettingsState(
     val eqPreset: String = "Flat",
     /** One gain per band in dB, −12 … +12. */
     val eqBands: List<Float> = List(EQ_BAND_COUNT) { 0f },
-    /** The parametric equalizer: its own switch, and up to 16 bands (type, frequency, gain, Q). */
+    /** The parametric equalizer: its own switch, and up to 16 bands (type, frequency, gain, Q). Never on together with the graphic one. */
     val peqEnabled: Boolean = false,
     val peqBands: List<PeqBand> = defaultPeqBands(),
     /** Turn the whole equalizer down by its highest boost, so boosting a band can never clip. */
@@ -144,10 +144,24 @@ class AppSettings private constructor(context: Context) {
 
     fun update(transform: (SettingsState) -> SettingsState) {
         val current = _state.value
-        val next = transform(current)
+        val next = onlyOneEqualizer(current, transform(current))
         if (next == current) return
         _state.value = next
         save(next)
+    }
+
+    /**
+     * The graphic and the parametric equalizer are never on together. Whichever one was just
+     * switched on (by its switch, a preset, or a pasted filter list) wins and the other is turned
+     * off. Every settings change passes through here, so no screen has to remember this rule.
+     */
+    private fun onlyOneEqualizer(prev: SettingsState, next: SettingsState): SettingsState {
+        if (!(next.eqEnabled && next.peqEnabled)) return next
+        return when {
+            next.peqEnabled && !prev.peqEnabled -> next.copy(eqEnabled = false)  // parametric just switched on
+            next.eqEnabled && !prev.eqEnabled -> next.copy(peqEnabled = false)   // graphic just switched on
+            else -> next.copy(peqEnabled = false)
+        }
     }
 
     private fun load(): SettingsState {
@@ -157,7 +171,7 @@ class AppSettings private constructor(context: Context) {
             ?.mapNotNull { it.toFloatOrNull() }
             ?.takeIf { it.size == EQ_BAND_COUNT }
             ?: d.eqBands
-        return SettingsState(
+        val loaded = SettingsState(
             themeMode = parseEnum(prefs.getString(KEY_THEME, null), d.themeMode),
             accent = parseEnum(prefs.getString(KEY_ACCENT, null), d.accent),
             haptics = prefs.getBoolean(KEY_HAPTICS, d.haptics),
@@ -191,6 +205,8 @@ class AppSettings private constructor(context: Context) {
             stereoWidth = prefs.getFloat(KEY_WIDTH, d.stereoWidth),
             balance = prefs.getFloat(KEY_BALANCE, d.balance),
         )
+        // Settings saved by an older version may have both equalizers on: keep the graphic one.
+        return if (loaded.eqEnabled && loaded.peqEnabled) loaded.copy(peqEnabled = false) else loaded
     }
 
     private fun save(s: SettingsState) {
