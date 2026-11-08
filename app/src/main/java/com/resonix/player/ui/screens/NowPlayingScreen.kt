@@ -50,10 +50,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -62,6 +66,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -138,12 +144,20 @@ fun NowPlayingScreen(
         onDispose { view.keepScreenOn = previous }
     }
 
+    // A full-bleed cover needs a tall, narrow window: the controls under it take a fixed amount of
+    // room, and in landscape or on a very short screen nothing would be left for the picture. There
+    // the framed look is used instead, whatever the setting says (the setting itself is untouched).
+    val config = LocalConfiguration.current
+    val roomForBleed = config.screenWidthDp.toFloat() <= config.screenHeightDp * BLEED_MAX_ASPECT &&
+        config.screenHeightDp >= BLEED_MIN_HEIGHT_DP
+    val bleeding = fullFrameArt && roomForBleed
+
     // The full-frame background is always dark, so the status / navigation bar icons have to be
     // light while it is showing — whatever the app theme says. Handed back when it goes away.
-    if (fullFrameArt && !view.isInEditMode) {
+    if (bleeding && !view.isInEditMode) {
         SideEffect { setLightSystemBars(view, light = false) }
     }
-    DisposableEffect(fullFrameArt, neo.isDark) {
+    DisposableEffect(bleeding, neo.isDark) {
         onDispose { if (!view.isInEditMode) setLightSystemBars(view, light = !neo.isDark) }
     }
 
@@ -199,7 +213,7 @@ fun NowPlayingScreen(
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
         Crossfade(
-            targetState = fullFrameArt,
+            targetState = bleeding,
             modifier = Modifier.fillMaxSize(),
             animationSpec = tween(260),
             label = "nowPlayingLook",
@@ -238,6 +252,16 @@ private class PlayerControls(
 
 // ──────────────────────────── full-frame look ────────────────────────────
 
+/**
+ * The cover runs edge to edge up under the status bar and dissolves into one continuous
+ * background tinted from its own colours; the title and controls sit on that background.
+ *
+ * Three things keep the join between picture and background invisible:
+ *  - the page behind is a single gradient, and the cover is faded out *into* it (its own alpha is
+ *    masked), rather than a coloured overlay being laid over the cover;
+ *  - the fade follows a smootherstep curve cut into many stops, so neither end of it shows as a line;
+ *  - the background tint is read from the lower part of the cover, the part the fade passes through.
+ */
 @Composable
 private fun FullFrameLayout(c: PlayerControls) {
     val state = c.state
@@ -247,6 +271,7 @@ private fun FullFrameLayout(c: PlayerControls) {
     val fallbackTint = remember(neo.accent) { Color(ArtPalette.tintFor(neo.accent.toArgb())) }
     val tint by rememberArtTint(art, fallbackTint)
     val deep = lerp(tint, Color.Black, 0.55f)
+    val page = remember(tint, deep) { pageBrush(tint, deep) }
 
     val primary = Color.White
     val secondary = Color.White.copy(alpha = 0.68f)
@@ -254,7 +279,9 @@ private fun FullFrameLayout(c: PlayerControls) {
 
     val currentOnClose by rememberUpdatedState(c.onClose)
 
-    Box(modifier = Modifier.fillMaxSize().background(deep)) {
+    // One background for the whole screen. The cover fades into exactly this, so there is nothing
+    // to match up between the picture and what is under it.
+    Box(modifier = Modifier.fillMaxSize().background(page)) {
         Column(modifier = Modifier.fillMaxSize()) {
 
             // ── artwork, edge to edge, up under the status bar ──
@@ -262,6 +289,9 @@ private fun FullFrameLayout(c: PlayerControls) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
+                    // Lets the title and controls start inside the fade instead of under a band of
+                    // empty background where the picture has already gone.
+                    .rideUnder(TITLE_RIDE_UP)
                     // Drag the cover down to close, like a sheet.
                     .pointerInput(Unit) {
                         var total = 0f
@@ -279,51 +309,49 @@ private fun FullFrameLayout(c: PlayerControls) {
                         )
                     },
             ) {
-                Crossfade(
-                    targetState = art,
-                    modifier = Modifier.fillMaxSize(),
-                    animationSpec = tween(350),
-                    label = "fullFrameArt",
-                ) { shown ->
-                    if (shown != null) {
-                        Image(
-                            bitmap = shown,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Brush.verticalGradient(listOf(lerp(tint, Color.White, 0.12f), deep))),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                imageVector = NeoIcons.Music,
+                // The picture and the fade. Kept in one layer so the mask only touches the picture.
+                Box(modifier = Modifier.fillMaxSize().dissolveBottom(DISSOLVE_FRACTION)) {
+                    Crossfade(
+                        targetState = art,
+                        modifier = Modifier.fillMaxSize(),
+                        animationSpec = tween(350),
+                        label = "fullFrameArt",
+                    ) { shown ->
+                        if (shown != null) {
+                            Image(
+                                bitmap = shown,
                                 contentDescription = null,
-                                tint = Color.White.copy(alpha = 0.25f),
-                                modifier = Modifier.size(110.dp),
+                                contentScale = ContentScale.Crop,
+                                // A square cover in a taller frame loses its sides; if the frame is
+                                // ever wider than it is tall, keep the top (where titles usually are).
+                                alignment = BiasAlignment(0f, -0.4f),
+                                modifier = Modifier.fillMaxSize(),
                             )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Brush.verticalGradient(listOf(lerp(tint, Color.White, 0.12f), tint))),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = NeoIcons.Music,
+                                    contentDescription = null,
+                                    tint = Color.White.copy(alpha = 0.25f),
+                                    modifier = Modifier.size(110.dp),
+                                )
+                            }
                         }
                     }
                 }
 
-                // Darkens the very top so the buttons and status bar stay readable on any cover.
+                // Keeps the status bar and the buttons readable on any cover; eased so it has no edge.
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .height(130.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.50f), Color.Transparent))),
-                )
-                // The cover melts into the tinted background below it.
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(190.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, tint))),
+                        .height(150.dp)
+                        .background(Brush.verticalGradient(*TopScrimStops)),
                 )
 
                 TopBar(
@@ -333,7 +361,16 @@ private fun FullFrameLayout(c: PlayerControls) {
                         .align(Alignment.TopCenter)
                         .statusBarsPadding(),
                 )
+            }
 
+            // ── everything else, straight on the page ──
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 24.dp)
+                    .padding(bottom = 14.dp),
+            ) {
                 val caption = qualityCaption(state)
                 if (caption.isNotBlank()) {
                     Text(
@@ -342,24 +379,9 @@ private fun FullFrameLayout(c: PlayerControls) {
                         style = NeoType.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(horizontal = 24.dp)
-                            .padding(bottom = 6.dp),
+                        modifier = Modifier.padding(bottom = 6.dp),
                     )
                 }
-            }
-
-            // ── everything else, on the tinted background ──
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(tint, deep)))
-                    .navigationBarsPadding()
-                    .padding(horizontal = 24.dp)
-                    .padding(bottom = 14.dp),
-            ) {
                 TitleBlock(state, primary, secondary)
 
                 Spacer(Modifier.height(18.dp))
@@ -432,7 +454,82 @@ private fun FullFrameLayout(c: PlayerControls) {
     }
 }
 
-/** The dominant colour of the cover as a dark background tint; eases from one song's to the next. */
+// ───────── the full-bleed cover's helpers ─────────
+
+/** The window is at most this wide for its height (width ÷ height) for the cover to bleed. */
+private const val BLEED_MAX_ASPECT = 0.75f
+
+/** ...and at least this tall (dp), so there is room for the picture above the controls. */
+private const val BLEED_MIN_HEIGHT_DP = 560
+
+/** The lower share of the cover's frame that dissolves into the background. */
+private const val DISSOLVE_FRACTION = 0.46f
+
+/** How far the title block starts up inside that fade. */
+private val TITLE_RIDE_UP = 36.dp
+
+/** Smootherstep: 0 → 1 with zero slope at both ends, so an eased ramp has no visible start or stop. */
+private fun smootherStep(t: Float): Float {
+    val x = t.coerceIn(0f, 1f)
+    return x * x * x * (x * (x * 6f - 15f) + 10f)
+}
+
+/** The cover's alpha along the fade: opaque at the top of it, gone at the bottom. */
+private val DissolveStops: Array<Pair<Float, Color>> = Array(13) { i ->
+    val t = i / 12f
+    t to Color.Black.copy(alpha = 1f - smootherStep(t))
+}
+
+/** The darkening behind the status bar and top buttons: strongest at the edge, eased to nothing. */
+private val TopScrimStops: Array<Pair<Float, Color>> = Array(9) { i ->
+    val t = i / 8f
+    t to Color.Black.copy(alpha = 0.55f * (1f - smootherStep(t)))
+}
+
+/** The screen's background: the cover's tint down to where the fade ends, then easing to its deep shade. */
+private fun pageBrush(tint: Color, deep: Color): Brush {
+    val stops = ArrayList<Pair<Float, Color>>(10)
+    stops.add(0f to tint)
+    for (i in 0..8) {
+        val t = i / 8f
+        stops.add((0.50f + 0.50f * t) to lerp(tint, deep, smootherStep(t)))
+    }
+    return Brush.verticalGradient(*stops.toTypedArray())
+}
+
+/**
+ * Fades the bottom [fraction] of whatever this wraps to transparent, along a smootherstep curve.
+ * The fade is a mask on the content's own alpha, which is why it needs a layer of its own.
+ */
+private fun Modifier.dissolveBottom(fraction: Float): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithCache {
+        val mask = Brush.verticalGradient(
+            *DissolveStops,
+            startY = size.height * (1f - fraction),
+            endY = size.height,
+        )
+        onDrawWithContent {
+            drawContent()
+            drawRect(brush = mask, blendMode = BlendMode.DstIn)
+        }
+    }
+
+/**
+ * Measures this [overlap] taller than it is laid out: the content is drawn at full size, but the
+ * next sibling is placed [overlap] higher, so it starts on top of the end of this one.
+ */
+private fun Modifier.rideUnder(overlap: Dp): Modifier = layout { measurable, constraints ->
+    val extra = overlap.roundToPx()
+    val height = constraints.maxHeight + extra
+    val placeable = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
+    layout(placeable.width, (placeable.height - extra).coerceAtLeast(0)) { placeable.place(0, 0) }
+}
+
+/**
+ * The dominant colour of the lower part of the cover — the part that dissolves into the page — as a
+ * dark background tint; eases from one song's to the next.
+ */
 @Composable
 private fun rememberArtTint(art: ImageBitmap?, fallback: Color): State<Color> {
     val target = remember { mutableStateOf(fallback) }
@@ -440,7 +537,7 @@ private fun rememberArtTint(art: ImageBitmap?, fallback: Color): State<Color> {
         val argb = if (art == null) {
             null
         } else {
-            withContext(Dispatchers.Default) { tintFromBitmap(art.asAndroidBitmap()) }
+            withContext(Dispatchers.Default) { tintFromBitmap(art.asAndroidBitmap(), fromFraction = 0.45f) }
         }
         target.value = if (argb != null) Color(argb) else fallback
     }

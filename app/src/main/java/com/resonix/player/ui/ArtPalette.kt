@@ -144,12 +144,18 @@ object ArtPalette {
 /**
  * The background tint (ARGB) for [bitmap], or `null` if it cannot be sampled (e.g. a hardware
  * bitmap the CPU may not read). Samples a 32×32 thumbnail, so it is cheap.
+ *
+ * [fromFraction] skips the top of the picture: 0 looks at all of it, 0.45 only at the lower
+ * 55 %. The full-frame player passes the latter, because the lower part of the cover is what the
+ * background has to blend into.
  */
-fun tintFromBitmap(bitmap: Bitmap): Int? {
+fun tintFromBitmap(bitmap: Bitmap, fromFraction: Float = 0f): Int? {
     return try {
         val small = Bitmap.createScaledBitmap(bitmap, 32, 32, true)
-        val pixels = IntArray(32 * 32)
-        small.getPixels(pixels, 0, 32, 0, 0, 32, 32)
+        val firstRow = (32 * fromFraction.coerceIn(0f, 0.9f)).toInt()
+        val rows = 32 - firstRow
+        val pixels = IntArray(32 * rows)
+        small.getPixels(pixels, 0, 32, 0, firstRow, 32, rows)
         if (small !== bitmap) small.recycle()
         ArtPalette.tintOf(pixels)
     } catch (e: Exception) {
