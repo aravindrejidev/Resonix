@@ -260,9 +260,14 @@ private class PlayerControls(
  * dissolves into a background tinted from its own colours, and that background carries the rest
  * of the screen.
  *
- * The cover, the title and the controls are placed by hand ([Layout] below): the controls stay at
- * the bottom, the title sits right under the cover, and whatever height is left over is simply
- * background between the two.
+ * Everything under the cover has a fixed place in one column, top to bottom:
+ *
+ *     cover ── title · artist · format ── seek bar + times ── prev · play · next ── volume · output
+ *
+ * The title starts inside the end of the cover's fade, the output line is pinned to the bottom, and
+ * the height left over is shared out as even gaps between the groups (each with a smallest and a
+ * largest size). Only if a very tall screen still has height to spare does the rest go above the
+ * title, as plain background under the cover. The groups are placed by hand ([Layout] below).
  *
  * Three things keep the join between picture and background invisible:
  *  - the page behind is a single gradient, and the cover is faded out *into* it (its own alpha is
@@ -377,35 +382,32 @@ private fun FullFrameLayout(c: PlayerControls) {
                 )
             }
 
-            // ── 2 · title, straight on the page, starting inside the end of the fade ──
+            // ── 2 · who is playing: title, artist, and what the file is ──
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp),
+                    .padding(horizontal = SIDE_MARGIN),
             ) {
+                TitleBlock(state, primary, secondary)
                 val caption = qualityCaption(state)
                 if (caption.isNotBlank()) {
                     Text(
                         text = caption,
-                        color = secondary,
+                        color = tertiary,
                         style = NeoType.caption,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(bottom = 6.dp),
+                        modifier = Modifier.padding(top = 8.dp),
                     )
                 }
-                TitleBlock(state, primary, secondary)
             }
 
-            // ── 3 · seek, transport, volume — pinned to the bottom ──
+            // ── 3 · where in the song: seek bar, then the times with the quality label between ──
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 24.dp)
-                    .padding(bottom = 14.dp),
+                    .padding(horizontal = SIDE_MARGIN),
             ) {
-                Spacer(Modifier.height(12.dp))
                 FlatSeekBar(
                     value = c.seekFraction,
                     onValueChange = c.onSeekChange,
@@ -429,27 +431,37 @@ private fun FullFrameLayout(c: PlayerControls) {
                         modifier = Modifier.align(Alignment.CenterEnd),
                     )
                 }
+            }
 
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    FlatTransportButton(NeoIcons.Previous, "Previous", c.onPrevious, boxSize = 72.dp, iconSize = 40.dp, tint = primary)
-                    FlatTransportButton(
-                        icon = if (state.isPlaying) NeoIcons.Pause else NeoIcons.Play,
-                        description = if (state.isPlaying) "Pause" else "Play",
-                        onClick = c.onPlayPause,
-                        boxSize = 96.dp,
-                        iconSize = 62.dp,
-                        tint = primary,
-                    )
-                    FlatTransportButton(NeoIcons.Next, "Next", c.onNext, boxSize = 72.dp, iconSize = 40.dp, tint = primary)
-                }
+            // ── 4 · what to play: previous, play / pause, next ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = SIDE_MARGIN),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FlatTransportButton(NeoIcons.Previous, "Previous", c.onPrevious, boxSize = 72.dp, iconSize = 40.dp, tint = primary)
+                FlatTransportButton(
+                    icon = if (state.isPlaying) NeoIcons.Pause else NeoIcons.Play,
+                    description = if (state.isPlaying) "Pause" else "Play",
+                    onClick = c.onPlayPause,
+                    boxSize = 96.dp,
+                    iconSize = 62.dp,
+                    tint = primary,
+                )
+                FlatTransportButton(NeoIcons.Next, "Next", c.onNext, boxSize = 72.dp, iconSize = 40.dp, tint = primary)
+            }
 
+            // ── 5 · the foot of the screen: volume (if shown) and where the sound goes ──
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = SIDE_MARGIN)
+                    .padding(bottom = 14.dp),
+            ) {
                 if (c.showVolume) {
-                    Spacer(Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -467,8 +479,8 @@ private fun FullFrameLayout(c: PlayerControls) {
                         )
                         Icon(NeoIcons.Volume, contentDescription = null, tint = secondary, modifier = Modifier.size(24.dp))
                     }
+                    Spacer(Modifier.height(6.dp))
                 }
-
                 OutputLine(state.outputInfo, tertiary)
             }
         },
@@ -476,21 +488,46 @@ private fun FullFrameLayout(c: PlayerControls) {
         val width = constraints.maxWidth
         val height = constraints.maxHeight
 
-        // The title and the controls take what they need; the cover gets what is left, up to its limit.
+        // The groups under the cover take the room they need.
         val loose = Constraints(minWidth = width, maxWidth = width, minHeight = 0, maxHeight = height)
-        val title = measurables[1].measure(loose)
-        val controls = measurables[2].measure(loose)
+        val info = measurables[1].measure(loose)
+        val seek = measurables[2].measure(loose)
+        val transport = measurables[3].measure(loose)
+        val foot = measurables[4].measure(loose)
 
+        // Smallest gap and the most it may grow by, for: info→seek, seek→transport, transport→foot.
+        val minGap = intArrayOf(GAP_INFO_SEEK.min.roundToPx(), GAP_SEEK_TRANSPORT.min.roundToPx(), GAP_TRANSPORT_FOOT.min.roundToPx())
+        val growBy = intArrayOf(GAP_INFO_SEEK.grow.roundToPx(), GAP_SEEK_TRANSPORT.grow.roundToPx(), GAP_TRANSPORT_FOOT.grow.roundToPx())
+        val minTotal = minGap.sum()
+
+        // The cover gets what is left over once those are in, up to its limit.
         val ride = TITLE_RIDE_UP.roundToPx()
+        val groups = info.height + seek.height + transport.height + foot.height
         val wanted = (width * coverRatio).roundToInt()
-        val room = (height - controls.height - title.height + ride).coerceAtLeast(0)
+        val room = (height - groups - minTotal + ride).coerceAtLeast(0)
         val coverHeight = minOf(wanted, room)
         val cover = measurables[0].measure(Constraints.fixed(width, coverHeight))
 
+        // Whatever height is still free is shared out between the three gaps, a little more of it
+        // above the seek bar. Any beyond what the gaps may take ends up under the cover.
+        val free = (height - ((coverHeight - ride) + groups)).coerceAtLeast(0)
+        val extra = (free - minTotal).coerceAtLeast(0)
+        val share = floatArrayOf(GAP_SHARE[0], GAP_SHARE[1], GAP_SHARE[2])
+        val shareSum = share.sum()
+        val gap = IntArray(3) { i -> minGap[i] + minOf(growBy[i], (extra * share[i] / shareSum).toInt()) }
+
+        // Stacked up from the bottom edge, so the foot never moves and rounding lands under the cover.
+        val footY = height - foot.height
+        val transportY = footY - gap[2] - transport.height
+        val seekY = transportY - gap[1] - seek.height
+        val infoY = (seekY - gap[0] - info.height).coerceAtLeast((coverHeight - ride).coerceAtLeast(0))
+
         layout(width, height) {
             cover.place(0, 0)
-            title.place(0, (coverHeight - ride).coerceAtLeast(0))
-            controls.place(0, height - controls.height)
+            info.place(0, infoY)
+            seek.place(0, seekY)
+            transport.place(0, transportY)
+            foot.place(0, footY)
         }
     }
 }
@@ -514,6 +551,19 @@ private const val DISSOLVE_FRACTION = 0.40f
 
 /** How far the title starts up inside that fade. */
 private val TITLE_RIDE_UP = 36.dp
+
+/** Space at the left and right edge of everything under the cover. */
+private val SIDE_MARGIN = 24.dp
+
+/** A gap between two groups: never smaller than [min], and given at most [grow] more than that. */
+private class GapRange(val min: Dp, val grow: Dp)
+
+private val GAP_INFO_SEEK = GapRange(min = 16.dp, grow = 56.dp)
+private val GAP_SEEK_TRANSPORT = GapRange(min = 8.dp, grow = 40.dp)
+private val GAP_TRANSPORT_FOOT = GapRange(min = 8.dp, grow = 40.dp)
+
+/** How the free height is divided between those three gaps (a little more above the seek bar). */
+private val GAP_SHARE = floatArrayOf(1.2f, 1f, 1f)
 
 /** Smootherstep: 0 → 1 with zero slope at both ends, so an eased ramp has no visible start or stop. */
 private fun smootherStep(t: Float): Float {
@@ -820,7 +870,7 @@ private fun GlassButton(icon: ImageVector, description: String, onClick: () -> U
 @Composable
 private fun TitleBlock(state: NowPlayingUiState, titleColor: Color, artistColor: Color) {
     Text(
-        text = state.title.ifBlank { "Unknown title" },
+        text = state.title.trim().ifBlank { "Unknown title" },
         color = titleColor,
         style = NeoType.title,
         maxLines = 2,
@@ -829,7 +879,7 @@ private fun TitleBlock(state: NowPlayingUiState, titleColor: Color, artistColor:
     )
     Spacer(Modifier.height(2.dp))
     Text(
-        text = state.artist.ifBlank { "Unknown artist" },
+        text = state.artist.trim().ifBlank { "Unknown artist" },
         color = artistColor,
         style = NeoType.body,
         maxLines = 1,
