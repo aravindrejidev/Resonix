@@ -100,15 +100,15 @@ fun HomeMenu(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
-                    .padding(top = 74.dp, end = 12.dp, start = 28.dp, bottom = 28.dp),
+                    .padding(top = 70.dp, end = 12.dp, start = 28.dp, bottom = 28.dp),
             ) {
                 Column(
                     modifier = Modifier
-                        .width(296.dp)
-                        .neoFloating(cornerRadius = 24.dp, elevation = 16.dp)
-                        .heightIn(max = 560.dp)
+                        .width(240.dp)
+                        .neoFloating(cornerRadius = 20.dp, elevation = 14.dp)
+                        .heightIn(max = 460.dp)
                         .verticalScroll(rememberScrollState())
-                        .padding(vertical = 10.dp)
+                        .padding(vertical = 6.dp)
                         // Swallow taps on the panel itself so they don't reach the dismiss layer.
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
@@ -124,9 +124,9 @@ fun HomeMenu(
                         enabled = canRescan,
                         onClick = { onDismiss(); onRescan() },
                     )
-                    NeoDivider(Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+                    NeoDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
 
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 text = "SORT SONGS BY",
@@ -137,28 +137,28 @@ fun HomeMenu(
                             NeoIconButton(
                                 icon = if (sortAscending) NeoIcons.Ascending else NeoIcons.Descending,
                                 onClick = onToggleDirection,
-                                diameter = 36.dp,
-                                iconSize = 18.dp,
+                                diameter = 32.dp,
+                                iconSize = 16.dp,
                                 contentDescription = if (sortAscending) "Ascending" else "Descending",
                             )
                         }
-                        Spacer(Modifier.height(10.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             NeoChip(SortKey.TITLE.label, sortKey == SortKey.TITLE, onClick = { onSortKey(SortKey.TITLE) })
                             NeoChip(SortKey.ARTIST.label, sortKey == SortKey.ARTIST, onClick = { onSortKey(SortKey.ARTIST) })
                         }
-                        Spacer(Modifier.height(10.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             NeoChip(SortKey.DATE_ADDED.label, sortKey == SortKey.DATE_ADDED, onClick = { onSortKey(SortKey.DATE_ADDED) })
                             NeoChip(SortKey.DURATION.label, sortKey == SortKey.DURATION, onClick = { onSortKey(SortKey.DURATION) })
                         }
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(4.dp))
                     }
 
-                    NeoDivider(Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+                    NeoDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                     ToggleItem("Quality badges", showBadges, onToggleBadges)
                     ToggleItem("Album art", showArt, onToggleArt)
-                    NeoDivider(Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+                    NeoDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                     MenuItem(NeoIcons.Settings, "Settings", onClick = { onDismiss(); onOpenSettings() })
                 }
             }
@@ -180,24 +180,24 @@ private fun MenuItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = 6.dp)
             .background(
                 color = if (pressed && enabled) neo.accent.copy(alpha = 0.12f) else Color.Transparent,
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(14.dp),
             )
             .clickable(interactionSource = source, indication = null, enabled = enabled, role = Role.Button) {
                 haptic()
                 onClick()
             }
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         NeoIconBadge(
             icon = icon,
-            diameter = 38.dp,
+            diameter = 32.dp,
             tint = if (enabled) neo.accent else neo.textTertiary,
         )
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(10.dp))
         Text(
             text = label,
             color = if (enabled) neo.textPrimary else neo.textTertiary,
@@ -213,7 +213,7 @@ private fun ToggleItem(label: String, checked: Boolean, onToggle: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 8.dp),
+            .padding(horizontal = 20.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(

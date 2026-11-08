@@ -84,13 +84,13 @@ fun PlayerMenu(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
-                    .padding(top = 70.dp, end = 16.dp, start = 28.dp, bottom = 28.dp),
+                    .padding(top = 66.dp, end = 16.dp, start = 28.dp, bottom = 28.dp),
             ) {
                 Column(
                     modifier = Modifier
-                        .width(300.dp)
-                        .neoFloating(cornerRadius = 24.dp, elevation = 16.dp)
-                        .padding(vertical = 10.dp)
+                        .width(276.dp)
+                        .neoFloating(cornerRadius = 20.dp, elevation = 14.dp)
+                        .padding(vertical = 6.dp)
                         // Swallow taps on the panel itself so they don't reach the dismiss layer.
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
@@ -110,7 +110,7 @@ fun PlayerMenu(
                         checked = keepScreenOn,
                         onToggle = onToggleKeepScreenOn,
                     )
-                    NeoDivider(Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+                    NeoDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                     MenuAction(
                         icon = NeoIcons.Tools,
                         label = "Sound tools",
@@ -139,20 +139,20 @@ private fun MenuToggle(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = 6.dp)
             .background(
                 color = if (pressed) neo.accent.copy(alpha = 0.12f) else Color.Transparent,
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(14.dp),
             )
             .clickable(interactionSource = source, indication = null, role = Role.Switch) {
                 haptic()
                 onToggle()
             }
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        NeoIconBadge(icon = icon, diameter = 38.dp, tint = neo.accent)
-        Spacer(Modifier.width(12.dp))
+        NeoIconBadge(icon = icon, diameter = 32.dp, tint = neo.accent)
+        Spacer(Modifier.width(10.dp))
         Text(
             text = label,
             color = neo.textPrimary,
@@ -177,20 +177,20 @@ private fun MenuAction(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = 6.dp)
             .background(
                 color = if (pressed) neo.accent.copy(alpha = 0.12f) else Color.Transparent,
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(14.dp),
             )
             .clickable(interactionSource = source, indication = null, role = Role.Button) {
                 haptic()
                 onClick()
             }
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        NeoIconBadge(icon = icon, diameter = 38.dp, tint = neo.accent)
-        Spacer(Modifier.width(12.dp))
+        NeoIconBadge(icon = icon, diameter = 32.dp, tint = neo.accent)
+        Spacer(Modifier.width(10.dp))
         Text(text = label, color = neo.textPrimary, style = NeoType.body, maxLines = 1)
     }
 }

@@ -66,12 +66,13 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
@@ -99,6 +100,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * The full-screen player. One structure, two looks:
@@ -253,8 +255,14 @@ private class PlayerControls(
 // ──────────────────────────── full-frame look ────────────────────────────
 
 /**
- * The cover runs edge to edge up under the status bar and dissolves into one continuous
- * background tinted from its own colours; the title and controls sit on that background.
+ * The cover runs edge to edge up under the status bar, at most as tall as it is wide — it is never
+ * zoomed past that to fill a taller screen, so none of it is cropped away. Its lower part then
+ * dissolves into a background tinted from its own colours, and that background carries the rest
+ * of the screen.
+ *
+ * The cover, the title and the controls are placed by hand ([Layout] below): the controls stay at
+ * the bottom, the title sits right under the cover, and whatever height is left over is simply
+ * background between the two.
  *
  * Three things keep the join between picture and background invisible:
  *  - the page behind is a single gradient, and the cover is faded out *into* it (its own alpha is
@@ -273,6 +281,15 @@ private fun FullFrameLayout(c: PlayerControls) {
     val deep = lerp(tint, Color.Black, 0.55f)
     val page = remember(tint, deep) { pageBrush(tint, deep) }
 
+    // How tall the cover is allowed to be, as a share of the screen width: a square cover gets 1.0
+    // (shown whole, never zoomed in); a wider one gets less, so it is not cropped at the sides either.
+    val coverRatio by animateFloatAsState(
+        targetValue = art?.let { (it.height.toFloat() / it.width).coerceIn(COVER_MIN_RATIO, COVER_MAX_RATIO) }
+            ?: COVER_MAX_RATIO,
+        animationSpec = tween(300),
+        label = "coverRatio",
+    )
+
     val primary = Color.White
     val secondary = Color.White.copy(alpha = 0.68f)
     val tertiary = Color.White.copy(alpha = 0.46f)
@@ -281,17 +298,14 @@ private fun FullFrameLayout(c: PlayerControls) {
 
     // One background for the whole screen. The cover fades into exactly this, so there is nothing
     // to match up between the picture and what is under it.
-    Box(modifier = Modifier.fillMaxSize().background(page)) {
-        Column(modifier = Modifier.fillMaxSize()) {
-
-            // ── artwork, edge to edge, up under the status bar ──
+    Layout(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(page),
+        content = {
+            // ── 1 · the cover, edge to edge, up under the status bar ──
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    // Lets the title and controls start inside the fade instead of under a band of
-                    // empty background where the picture has already gone.
-                    .rideUnder(TITLE_RIDE_UP)
                     // Drag the cover down to close, like a sheet.
                     .pointerInput(Unit) {
                         var total = 0f
@@ -322,8 +336,8 @@ private fun FullFrameLayout(c: PlayerControls) {
                                 bitmap = shown,
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
-                                // A square cover in a taller frame loses its sides; if the frame is
-                                // ever wider than it is tall, keep the top (where titles usually are).
+                                // Only matters for a cover that is not square: keep the top of it,
+                                // where titles usually are.
                                 alignment = BiasAlignment(0f, -0.4f),
                                 modifier = Modifier.fillMaxSize(),
                             )
@@ -363,13 +377,11 @@ private fun FullFrameLayout(c: PlayerControls) {
                 )
             }
 
-            // ── everything else, straight on the page ──
+            // ── 2 · title, straight on the page, starting inside the end of the fade ──
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 24.dp)
-                    .padding(bottom = 14.dp),
+                    .padding(horizontal = 24.dp),
             ) {
                 val caption = qualityCaption(state)
                 if (caption.isNotBlank()) {
@@ -383,8 +395,17 @@ private fun FullFrameLayout(c: PlayerControls) {
                     )
                 }
                 TitleBlock(state, primary, secondary)
+            }
 
-                Spacer(Modifier.height(18.dp))
+            // ── 3 · seek, transport, volume — pinned to the bottom ──
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 24.dp)
+                    .padding(bottom = 14.dp),
+            ) {
+                Spacer(Modifier.height(12.dp))
                 FlatSeekBar(
                     value = c.seekFraction,
                     onValueChange = c.onSeekChange,
@@ -450,6 +471,26 @@ private fun FullFrameLayout(c: PlayerControls) {
 
                 OutputLine(state.outputInfo, tertiary)
             }
+        },
+    ) { measurables, constraints ->
+        val width = constraints.maxWidth
+        val height = constraints.maxHeight
+
+        // The title and the controls take what they need; the cover gets what is left, up to its limit.
+        val loose = Constraints(minWidth = width, maxWidth = width, minHeight = 0, maxHeight = height)
+        val title = measurables[1].measure(loose)
+        val controls = measurables[2].measure(loose)
+
+        val ride = TITLE_RIDE_UP.roundToPx()
+        val wanted = (width * coverRatio).roundToInt()
+        val room = (height - controls.height - title.height + ride).coerceAtLeast(0)
+        val coverHeight = minOf(wanted, room)
+        val cover = measurables[0].measure(Constraints.fixed(width, coverHeight))
+
+        layout(width, height) {
+            cover.place(0, 0)
+            title.place(0, (coverHeight - ride).coerceAtLeast(0))
+            controls.place(0, height - controls.height)
         }
     }
 }
@@ -462,10 +503,16 @@ private const val BLEED_MAX_ASPECT = 0.75f
 /** ...and at least this tall (dp), so there is room for the picture above the controls. */
 private const val BLEED_MIN_HEIGHT_DP = 560
 
-/** The lower share of the cover's frame that dissolves into the background. */
-private const val DISSOLVE_FRACTION = 0.46f
+/** The cover is at most this tall for its width: square, so it is never zoomed in or cropped. */
+private const val COVER_MAX_RATIO = 1.0f
 
-/** How far the title block starts up inside that fade. */
+/** ...and a wide cover is allowed to be this short at the least, relative to the width. */
+private const val COVER_MIN_RATIO = 0.8f
+
+/** The lower share of the cover that dissolves into the background. */
+private const val DISSOLVE_FRACTION = 0.40f
+
+/** How far the title starts up inside that fade. */
 private val TITLE_RIDE_UP = 36.dp
 
 /** Smootherstep: 0 → 1 with zero slope at both ends, so an eased ramp has no visible start or stop. */
@@ -492,7 +539,7 @@ private fun pageBrush(tint: Color, deep: Color): Brush {
     stops.add(0f to tint)
     for (i in 0..8) {
         val t = i / 8f
-        stops.add((0.50f + 0.50f * t) to lerp(tint, deep, smootherStep(t)))
+        stops.add((0.45f + 0.55f * t) to lerp(tint, deep, smootherStep(t)))
     }
     return Brush.verticalGradient(*stops.toTypedArray())
 }
@@ -514,17 +561,6 @@ private fun Modifier.dissolveBottom(fraction: Float): Modifier = this
             drawRect(brush = mask, blendMode = BlendMode.DstIn)
         }
     }
-
-/**
- * Measures this [overlap] taller than it is laid out: the content is drawn at full size, but the
- * next sibling is placed [overlap] higher, so it starts on top of the end of this one.
- */
-private fun Modifier.rideUnder(overlap: Dp): Modifier = layout { measurable, constraints ->
-    val extra = overlap.roundToPx()
-    val height = constraints.maxHeight + extra
-    val placeable = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
-    layout(placeable.width, (placeable.height - extra).coerceAtLeast(0)) { placeable.place(0, 0) }
-}
 
 /**
  * The dominant colour of the lower part of the cover — the part that dissolves into the page — as a
