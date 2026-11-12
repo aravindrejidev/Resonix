@@ -499,6 +499,14 @@ private fun AudioSection(
             checked = settings.usbBitPerfect,
             onCheckedChange = { on -> onChange { it.copy(usbBitPerfect = on) } },
         )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Bolt,
+            title = "Gapless playback",
+            subtitle = "Songs that play as the same stream (same sample rate and channels) run into each other without a pause",
+            checked = settings.gapless,
+            onCheckedChange = { on -> onChange { it.copy(gapless = on) } },
+        )
     }
     SettingsGroup("Fidelity") {
         ChoiceRow(

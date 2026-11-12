@@ -105,6 +105,8 @@ data class SettingsState(
     /** Android 14+: ask the system for a bit-perfect path to a USB DAC (bypasses its mixer, volume and effects). */
     val usbBitPerfect: Boolean = true,
     val peakLimiter: Boolean = true,
+    /** Carry straight on from one song into the next, without a pause, whenever both play as the same stream. */
+    val gapless: Boolean = true,
 
     // Tools — equalizer
     val eqEnabled: Boolean = false,
@@ -190,6 +192,7 @@ class AppSettings private constructor(context: Context) {
             directVolumeLevel = prefs.getFloat(KEY_DVC_LEVEL, d.directVolumeLevel).coerceIn(0f, 1f),
             replayGain = parseEnum(prefs.getString(KEY_REPLAY_GAIN, null), d.replayGain),
             peakLimiter = prefs.getBoolean(KEY_LIMITER, d.peakLimiter),
+            gapless = prefs.getBoolean(KEY_GAPLESS, d.gapless),
             outputFormat = parseEnum(prefs.getString(KEY_OUTPUT_FORMAT, null), d.outputFormat),
             dither = parseEnum(prefs.getString(KEY_DITHER, null), d.dither),
             resamplerQuality = parseEnum(prefs.getString(KEY_RESAMPLER, null), d.resamplerQuality),
@@ -229,6 +232,7 @@ class AppSettings private constructor(context: Context) {
             .putFloat(KEY_DVC_LEVEL, s.directVolumeLevel)
             .putString(KEY_REPLAY_GAIN, s.replayGain.name)
             .putBoolean(KEY_LIMITER, s.peakLimiter)
+            .putBoolean(KEY_GAPLESS, s.gapless)
             .putString(KEY_OUTPUT_FORMAT, s.outputFormat.name)
             .putString(KEY_DITHER, s.dither.name)
             .putString(KEY_RESAMPLER, s.resamplerQuality.name)
@@ -278,6 +282,7 @@ class AppSettings private constructor(context: Context) {
         private const val KEY_DVC_LEVEL = "direct_volume_level"
         private const val KEY_REPLAY_GAIN = "replay_gain"
         private const val KEY_LIMITER = "peak_limiter"
+        private const val KEY_GAPLESS = "gapless"
         private const val KEY_EQ_ON = "eq_enabled"
         private const val KEY_EQ_PRESET = "eq_preset"
         private const val KEY_EQ_BANDS = "eq_bands"

@@ -28,6 +28,7 @@ import androidx.core.net.toUri
 import com.resonix.player.MainActivity
 import com.resonix.player.R
 import com.resonix.player.audio.NativeAudioEngine
+import com.resonix.player.audio.TrackProber
 import com.resonix.player.data.AppDatabase
 import com.resonix.player.data.Track
 import com.resonix.player.ui.AlbumArtLoader
@@ -104,6 +105,7 @@ class PlaybackService : Service() {
     /** What the current song was planned for; a change of these re-plans it on the spot. */
     private var lastRouteKey: String? = null
     private var lastPlanSettingsKey: String? = null
+    private var lastGapless: Boolean? = null
 
     private var isForeground = false
     private var destroyed = false
@@ -134,7 +136,9 @@ class PlaybackService : Service() {
         engine = NativeAudioEngine()
         routeMonitor = AudioRouteMonitor.get(this)
         queueManager = PlaybackQueueManager(
-            this, engine, AppDatabase.getInstance(this).trackDao(), beforePlay = ::planOutputFor
+            this, engine, AppDatabase.getInstance(this).trackDao(),
+            beforePlay = ::planOutputFor,
+            canPrepareNext = ::gaplessAllowed,
         )
         audioFocusManager = AudioFocusManager(
             context = this,
@@ -214,6 +218,7 @@ class PlaybackService : Service() {
         }
         audioFocusManager.abandonFocus()
         queueManager.release()  // waits for an in-flight load: the engine must outlive it
+        channelProber?.release()
         engineSettingsExecutor.shutdown()
         try {
             engineSettingsExecutor.awaitTermination(2, TimeUnit.SECONDS)
@@ -343,6 +348,12 @@ class PlaybackService : Service() {
             lastPlanSettingsKey = key
             replanCurrentSong()
         }
+        // Gapless switched on / off: open the next song now, or let go of the one that is waiting.
+        if (lastGapless != state.gapless) {
+            val first = lastGapless == null
+            lastGapless = state.gapless
+            if (!first) queueManager.refreshGapless()
+        }
     }
 
     private fun planSettingsKey(s: SettingsState): String =
@@ -404,7 +415,7 @@ class PlaybackService : Service() {
         val bitPerfect = usbBitPerfect
         if (usb && s.usbBitPerfect && bitPerfect != null && track.sampleRateHz > 0) {
             val plan = try {
-                bitPerfect.prepare(route.deviceId, track.sampleRateHz, track.bitDepth, 2)
+                bitPerfect.prepare(route.deviceId, track.sampleRateHz, track.bitDepth, channelCountOf(track))
             } catch (e: Exception) {
                 Log.w(TAG, "Bit-perfect planning failed", e)
                 null
@@ -433,6 +444,12 @@ class PlaybackService : Service() {
             forcedRate = OutputPlanner.chooseRate(track.sampleRateHz, route.sampleRates, nativeRate, s.bitPerfect)
         }
 
+        // Where Android mixes at a rate we know in advance (the phone's own speaker / headphone jack),
+        // the engine can convert to it itself instead of leaving that to Android's resampler. Elsewhere
+        // (USB, Bluetooth, HDMI) the rate is not known ahead; Android 14+ tells the engine afterwards.
+        val mixerRate = if (route.kind == RouteKind.SPEAKER || route.kind == RouteKind.WIRED) nativeRate else 0
+        engine.setPlatformMixerRate(mixerRate, route.deviceId)
+
         engine.setOutputPlan(
             deviceId = if (bitPerfectMixer) route.deviceId else 0,
             forcedRateHz = forcedRate,
@@ -440,6 +457,40 @@ class PlaybackService : Service() {
             bitPerfectMixer = bitPerfectMixer,
             nativeRateHz = nativeRate,
         )
+    }
+
+    /** Reads the channel count from the file itself (the library does not store it). Loader thread only. */
+    private var channelProber: TrackProber? = null
+
+    private fun channelCountOf(track: Track): Int {
+        return try {
+            val prober = channelProber ?: TrackProber().also { channelProber = it }
+            contentResolver.openFileDescriptor(track.contentUri.toUri(), "r")?.use { pfd ->
+                prober.probeFd(pfd.fd)?.channelCount?.takeIf { it > 0 }
+            } ?: 2
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read the channel count of ${track.title}", e)
+            2
+        }
+    }
+
+    /**
+     * May [next] be opened ahead of time to follow [current] without a gap? Only when it would be played as
+     * the very same output stream: with the USB bit-perfect mixer engaged that means the same sample rate
+     * *and* bit depth (the mixer's format was chosen for the first song), with Bit-perfect output on the
+     * same sample rate, and with it off every song is converted to one rate anyway. The engine checks the
+     * decoded rate and channel count again on its own.
+     */
+    private fun gaplessAllowed(current: Track, next: Track): Boolean {
+        val s = settings.state.value
+        if (!s.gapless) return false
+        return when {
+            bitPerfectActive ->
+                current.sampleRateHz > 0 && current.sampleRateHz == next.sampleRateHz &&
+                    current.bitDepth > 0 && current.bitDepth == next.bitDepth
+            !s.bitPerfect -> true
+            else -> current.sampleRateHz == next.sampleRateHz
+        }
     }
 
     private fun runOnMainAndWait(timeoutMs: Long, block: () -> Unit) {

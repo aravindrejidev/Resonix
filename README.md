@@ -40,7 +40,7 @@
 </div>
 
 > [!NOTE]
-> Resonix is in **beta (v0.1.0)**. The playback engine, output planning and sound-shaping tools are working. The **10-band equalizer is interface-only for now**: its bands are saved and drawn, but the engine does not apply them yet (see the [Roadmap](#roadmap)). What "bit-perfect" can mean depends on your phone and where the sound goes; see the [Disclaimer](#disclaimer).
+> Resonix is in **beta (v0.1.0)**. The playback engine, output planning, equalizer (graphic and parametric) and sound-shaping tools are all working. What "bit-perfect" can mean depends on your phone and where the sound goes; see the [Disclaimer](#disclaimer).
 
 ---
 
@@ -102,7 +102,8 @@ No accounts. No ads. No telemetry. The app does not even ask for the Internet pe
 
 #### Output & Devices
 - **Output API** — Auto, AAudio or OpenSL ES. If one cannot open, the other is used.
-- **Exclusive mode** — asks for sole access to the stream and skips Android's mixer and its effects.
+- **Exclusive mode** — asks for sole access to the stream, which skips Android's mixer and its effects *when the device grants it*. Many outputs do not; Resonix checks what it really got (see *When Android would resample* below).
+- **Gapless playback** — the next song is opened while the current one plays, and playback runs straight from the last sample of one into the first of the next, sample for sample. ReplayGain changes on exactly that sample. It applies whenever both songs come out as the same stream (same output rate and channel count; with the USB bit-perfect mixer also the same bit depth); otherwise the stream has to be reopened and there is a short gap, as in any player. Switch it off in Settings.
 - **Bit-perfect sample rates** — each song plays at its own rate, or the nearest rate the output accepts. Switch it off and everything goes out at the device's own rate, so the stream never reopens between songs.
 - **USB DAC bit-perfect (Android 14+)** — picks the best format the DAC offers and asks the system for a strict stream: no conversion, no resampling, no effects.
 - **Output awareness** — knows whether sound goes to a USB DAC, AUX, Bluetooth, HDMI or the speaker. Plugging a DAC in or out re-plans the song and carries on from the same position.
@@ -120,7 +121,7 @@ No accounts. No ads. No telemetry. The app does not even ask for the Internet pe
 - **Preamp** ±12 dB · **Bass boost** (low shelf, up to +10 dB below about 120 Hz) · **Stereo width** (mono to twice as wide) · **Balance** (left ↔ right).
 - **Click-free** — gain and balance changes glide in over about 10 ms.
 - **Sleep timer** — 15, 30, 45, 60 or 90 minutes. It lives in the playback service, so it keeps running when the app is closed.
-- **Equalizer (interface preview)** — 10 bands from 31 Hz to 16 kHz, ±12 dB, with 9 presets. Engine support is in progress.
+- **Equalizer** — a 10-band **graphic** EQ (31 Hz to 16 kHz, ±12 dB, 9 presets) and a **parametric** EQ with up to 16 bands (Peak, Low / High shelf, Low / High pass, Notch; 20 Hz to 20 kHz, ±24 dB, Q 0.1 to 20) with a live response graph and AutoEQ / Equalizer APO paste and copy. One of the two is active at a time. It runs in 64-bit in front of the rest of the chain, turns itself down for headroom so boosting cannot clip, and is skipped completely when flat.
 
 #### Playback
 - **Folder-based queue** with Play, Shuffle, Next / Previous and automatic advance. Unreadable files are skipped.
@@ -168,7 +169,8 @@ Inside the DSP chain, in this order:
 
 ```mermaid
 flowchart LR
-    I(["in"]) --> B["Bass shelf<br/>0 to +10 dB @ 120 Hz"]
+    I(["in"]) --> E["Equalizer<br/>graphic or parametric"]
+    E --> B["Bass shelf<br/>0 to +10 dB @ 120 Hz"]
     B --> W["Stereo width<br/>mid / side"]
     W --> G["Gain × balance<br/>volume · ReplayGain · preamp"]
     G --> L["Peak limiter<br/>ceiling ≈ −0.18 dBFS"]
@@ -180,6 +182,7 @@ flowchart LR
 |---|---|
 | **Decoder** | FFmpeg turns any supported file into interleaved 64-bit PCM. If the output rate differs from the file's, libswresample converts it at the chosen quality. |
 | **Ring buffer** | Holds about 2 seconds of 192 kHz stereo. The decode thread writes, the audio callback reads, and neither ever waits for the other. |
+| **Equalizer** | Up to 32 biquads in 64-bit (the graphic bands first, then the parametric ones), one set of filter memories per channel. Settings glide in over about 10 ms, and the stage is turned down by the peak of its own response so a boost cannot clip. Skipped entirely when off or flat. |
 | **Bass shelf** | A low shelf built from the standard RBJ biquad formulas, at 120 Hz with up to +10 dB. Skipped when off. |
 | **Stereo width** | Mid / side scaling for stereo audio: 0 is mono, 1 is the original image, 2 is twice as wide. |
 | **Gain × balance** | Direct volume, ReplayGain and preamp multiplied into one smoothed gain (up to +12 dB), plus left / right balance for stereo. |
@@ -187,7 +190,19 @@ flowchart LR
 | **Quantizer** | Rounds to the output format. 16 and 24 bit use TPDF dither of ±1 LSB, and *Auto* skips it when the signal is already on the output's grid. |
 
 > [!TIP]
-> The DSP chain handles up to 8 channels. Stereo width and balance apply to stereo audio; other layouts get the gain, bass and limiter stages.
+> The DSP chain handles up to 8 channels. Stereo width and balance apply to stereo audio; other layouts get the equalizer, gain, bass and limiter stages.
+
+### When Android would resample
+
+On a normal (shared) stream Android's mixer runs at one fixed rate, often 48 kHz, and quietly resamples anything else, with a resampler you cannot see or choose. Resonix does not leave that to chance:
+
+- The stream is opened without Oboe's own rate conversion, so a stream that did not get the requested rate is noticed.
+- **Android 14+** tells the engine the real rate of the device (`getHardwareSampleRate`). If it differs, the song is decoded for that rate instead, by Resonix's resampler at your quality setting, and the Signal card says so, for example `Resonix resampled 96 kHz → 48 kHz`. When the device confirms the rate, the card says `device 96 kHz`.
+- **Older Android** cannot say. For the phone's own speaker and headphone jack the mixer rate is known in advance and the same conversion is applied. On other outputs (USB, Bluetooth, HDMI) nothing is assumed and nothing is claimed.
+- What was learned is remembered for that output, so later songs go straight to the right rate without reopening the stream.
+- Never touched: the USB bit-perfect mixer, and exclusive (MMAP) streams the device really grants. Those are not resampled by Android.
+
+Where the device cannot take a song's rate at all (a 192 kHz file on a 96 kHz DAC), converting is unavoidable; the point is that it happens once, in a resampler you can see and set to Maximum.
 
 ### Picking the output sample rate
 
@@ -325,6 +340,7 @@ Settings are grouped into pages, and every row on the main list shows what is cu
 | | Exclusive mode | On |
 | | Bit-perfect output | On |
 | | USB DAC bit-perfect (Android 14+) | On |
+| | Gapless playback | On |
 | | Bits per sample: Auto / Float / 32 / 24 / 16 | Auto |
 | | Dither: Off / Auto / Always | Auto |
 | | Resampler quality: Standard / High / Maximum | High |
@@ -335,7 +351,7 @@ Settings are grouped into pages, and every row on the main list shows what is cu
 | | Peak limiter | On |
 | **About** | Version, licence and what Resonix is built with | n/a |
 
-**Tools** tab: Equalizer (preview) · Sound shaping (Preamp, Bass boost, Stereo width, Balance) · Sleep timer · Signal, which shows the real output stream, for example `AAudio · Exclusive · 96 kHz`.
+**Tools** tab: Graphic EQ · Parametric EQ · Sound shaping (Preamp, Bass boost, Stereo width, Balance) · Sleep timer · Signal, which shows the real output stream, for example `AAudio · Exclusive · 96 kHz`.
 
 </details>
 
@@ -356,12 +372,12 @@ git clone https://github.com/aravindrejidev/Resonix.git
 cd Resonix
 
 # Build a debug APK (the FFmpeg libraries are already in the repository)
-gradle :app:assembleDebug
+./gradlew :app:assembleDebug
 # Built APK will be located at: app/build/outputs/apk/debug/
 ```
 
 > [!TIP]
-> The repository contains `gradle-wrapper.properties` but not the wrapper script itself. Run `gradle wrapper --gradle-version 9.5.0` once if you want a `gradlew`, or just open the project in a recent Android Studio.
+> The Gradle wrapper (`./gradlew`, Gradle 9.5.0) is included, so `./gradlew :app:assembleDebug` works without a separate Gradle install. Android Studio opens the project directly.
 
 Release builds turn on R8 minification. The ProGuard rules keep every class with a native method, so the JNI bridge survives.
 
@@ -385,6 +401,20 @@ The workflow builds FFmpeg `n9.0.1` with the NDK for Android 8.0+, as an LGPL-on
 | **Build FFmpeg (one-time, manual)** | Run manually | Cross-compiles FFmpeg for each ABI and uploads `resonix-ffmpeg-libs` |
 
 ---
+
+### Signed release builds
+
+Create a keystore once and keep it safe (updates must be signed with the same key):
+
+```bash
+keytool -genkeypair -v -keystore resonix-release.jks -alias resonix -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Locally, export `RESONIX_KEYSTORE_PATH`, `RESONIX_KEYSTORE_PASSWORD`, `RESONIX_KEY_ALIAS` and `RESONIX_KEY_PASSWORD`, then run `./gradlew :app:assembleRelease`. Without those variables the release build is left unsigned. On GitHub, add the same four values as repository secrets (`RESONIX_KEYSTORE_BASE64` holds `base64 -w0 resonix-release.jks`) and push a tag such as `v0.2.0`; the **Signed Release** workflow builds, verifies the signature and attaches the APK to the release.
+
+### Host tests for the sound engine
+
+`tools/host-tests/` builds the real `AudioEngine`, `AudioDecoder` and DSP on a Linux machine against a stand-in for Oboe and checks gapless hand-over (sample for sample), ReplayGain on the boundary sample, seeks across a hand-over, platform-rate handling and the ring buffer. See the header of `tools/host-tests/run.sh` for the packages it needs.
 
 <a id="architecture"></a>
 ## 🏗️ Architecture & Tech Stack
@@ -420,7 +450,7 @@ flowchart TB
 
 | Folder | What it does |
 |---|---|
-| `app/src/main/cpp/` | The sound engine: `AudioEngine`, `AudioDecoder` (FFmpeg), `TrackProber`, and the header-only `Dsp.h`, `Limiter.h`, `Quantizer.h` and `RingBuffer.h`, plus the JNI bridge in `native-lib.cpp` |
+| `app/src/main/cpp/` | The sound engine: `AudioEngine`, `AudioDecoder` (FFmpeg), `TrackProber`, and the header-only `Dsp.h`, `Eq.h`, `Limiter.h`, `Quantizer.h` and `RingBuffer.h`, plus the JNI bridge in `native-lib.cpp` |
 | `app/src/main/cpp/ffmpeg/` | FFmpeg headers and prebuilt shared libraries for each ABI |
 | `audio/` | Kotlin side of the engine: `NativeAudioEngine` (JNI wrapper), track probing, codec and quality naming |
 | `playback/` | `PlaybackService`, queue manager, audio focus, output routing and planning, Direct volume control, USB bit-perfect, and the `AudioTrack` fallback driver |
@@ -471,8 +501,8 @@ These keep the audio thread glitch-free, and any change to the engine should res
 
 ```mermaid
 pie showData title What Resonix is made of (non-blank lines of code)
-    "Kotlin (app and interface)" : 9379
-    "C++ (sound engine)" : 2420
+    "Kotlin (app and interface)" : 10828
+    "C++ (sound engine)" : 3366
     "Build scripts and CI" : 507
 ```
 
@@ -489,15 +519,16 @@ pie showData title What Resonix is made of (non-blank lines of code)
 - [x] Sample-accurate seeking and a media session with a proper notification
 - [x] Sleep timer that survives closing the app
 - [x] Full-frame Now Playing with cover-tinted background, themes and accent colours
-
-**In progress**
-- [ ] **Equalizer engine.** The interface and 9 presets exist; the bands still need to be applied in `DspChain::process`, in front of the limiter.
+- [x] Equalizer engine: 10-band graphic and 16-band parametric, 64-bit biquads with automatic headroom
+- [x] Gapless playback: sample-exact hand-over between songs, ReplayGain switched on the boundary sample
+- [x] The engine checks the real device rate and converts itself instead of letting Android's mixer resample (Android 14+ verified, older versions for the built-in outputs)
+- [x] A release workflow that publishes signed APKs (`.github/workflows/release.yml`)
+- [x] Ring buffer indices are 64-bit on every ABI (a 32-bit index wrapped after about 3 hours of 192 kHz on armeabi-v7a)
+- [x] Room schema export and a migration path (version 3 is the baseline, see `data/Migrations.kt`); the library is no longer wiped on a schema change
+- [x] Settings-only backup rules: the library database and folder grants are not restored onto another phone
 
 **Ideas**
-- [ ] Proper database migrations before 1.0 (today a schema change resets the library)
 - [ ] Queue view and playlists
-- [ ] Gapless playback
-- [ ] A release workflow that publishes signed APKs
 
 Have an idea? Open an [issue](https://github.com/aravindrejidev/Resonix/issues) and tell us.
 
@@ -572,11 +603,10 @@ Resonix is free software, released under the [GNU General Public License v3.0](L
 ### Disclaimer
 - **Beta software.** Resonix is at version 0.1.0. Expect rough edges, and please report them.
 - **Bit-perfect has limits.** The engine can keep the signal untouched up to the point where it leaves the app. After that it depends on Android and your hardware. USB DAC bit-perfect needs Android 14 or newer and a DAC that offers a suitable format. Sound sent over Bluetooth or the built-in speaker is processed by the system or the radio link and cannot be bit-perfect.
-- **The equalizer is not active yet.** Its controls are saved and drawn, but they do not change the sound until the engine part is finished.
 - **Sound shaping is not magic.** Bass boost, width and gain change how a recording sounds. A large boost can still sound distorted, even though the limiter prevents clipping.
 - **Measurements are the developer's own.** Figures such as the resampler's passband error come from the developer's host-side tests (see `CHANGES.md`), not from an independent lab.
 - **Devices differ.** Android audio hardware and firmware vary a lot. If something misbehaves on your phone or DAC, please report it with the model name.
-- **Privacy.** Everything happens on the device. Resonix has no Internet permission, no accounts and no telemetry, and it does not upload your music or your listening.
+- **Privacy.** Everything happens on the device. Resonix has no Internet permission, no accounts and no telemetry, and it does not upload your music or your listening. Android's backup carries only your settings; your library list and folder access stay on the phone.
 
 ---
 

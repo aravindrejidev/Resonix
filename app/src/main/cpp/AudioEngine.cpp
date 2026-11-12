@@ -33,8 +33,10 @@ std::string describeSampleRate(int32_t hz) {
 }  // namespace
 
 AudioEngine::AudioEngine()
-        : mDecoder(std::make_unique<AudioDecoder>()),
-          mRingBuffer(std::make_unique<RingBuffer>(kRingBufferCapacitySamples)) {}
+        : mRingBuffer(std::make_unique<RingBuffer>(kRingBufferCapacitySamples)) {
+    mDecoders[0] = std::make_unique<AudioDecoder>();
+    mDecoders[1] = std::make_unique<AudioDecoder>();
+}
 
 AudioEngine::~AudioEngine() {
     stopDecodeThread();
@@ -44,13 +46,13 @@ AudioEngine::~AudioEngine() {
 
 bool AudioEngine::playTrack(const std::string &filePath) {
     return startPlayback(
-            [&](TrackInfo *info) { return mDecoder->open(filePath, info); },
+            [&](TrackInfo *info) { return active().open(filePath, info); },
             filePath.c_str());
 }
 
 bool AudioEngine::playTrackFd(int fd) {
     return startPlayback(
-            [&](TrackInfo *info) { return mDecoder->openFd(fd, info); },
+            [&](TrackInfo *info) { return active().openFd(fd, info); },
             "fd");
 }
 
@@ -63,6 +65,7 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
 
     mIsPlaying.store(false, std::memory_order_relaxed);  // not playing while the new file loads
     stopDecodeThread();  // decoder access must be exclusive to us here
+    clearGaplessLocked();  // a prepared next track / pending hand-over belongs to the old queue
 
     // Drop whatever the previous track left queued *before* the (possibly
     // slow) open below, so its tail can't leak out as a blip while the new
@@ -86,12 +89,20 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
     // The rate the decoder hands over at: whatever the output plan forces (the DAC's best match,
     // the bit-perfect mixer's rate); otherwise the file's own rate (Bit-perfect on) or the
     // device's native mixer rate (Bit-perfect off), so the stream stays put between songs.
+    // When the Android mixer on this route was already seen to resample to some other rate, go
+    // there directly rather than finding out again with every song.
+    // (Never with the bit-perfect mixer: that stream is not resampled by Android and is left alone.)
     const int forcedRate = mForcedRate.load(std::memory_order_relaxed);
-    const int targetRate = forcedRate > 0
-            ? forcedRate
-            : (mBitPerfect.load(std::memory_order_relaxed) ? 0 : mNativeRate.load(std::memory_order_relaxed));
-    mDecoder->setTargetSampleRate(targetRate);
-    mDecoder->setResamplerQuality(mResamplerQuality.load(std::memory_order_relaxed));
+    const int learnedRate = mBitPerfectMixer.load(std::memory_order_relaxed)
+            ? 0
+            : mLearnedPlatformRate.load(std::memory_order_relaxed);
+    int targetRate = learnedRate > 0
+            ? learnedRate
+            : (forcedRate > 0
+                       ? forcedRate
+                       : (mBitPerfect.load(std::memory_order_relaxed) ? 0 : mNativeRate.load(std::memory_order_relaxed)));
+    active().setTargetSampleRate(targetRate);
+    active().setResamplerQuality(mResamplerQuality.load(std::memory_order_relaxed));
 
     TrackInfo info;
     if (!openDecoder(&info)) {
@@ -103,17 +114,21 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
     }
     if (info.sampleRateHz <= 0 || info.outputSampleRateHz <= 0 || info.channelCount <= 0) {
         LOGE("Track has no usable audio format: %s", label);
-        mDecoder->close();
+        active().close();
         return false;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(mTrackInfoLock);
-        mTrackInfo = info;
-    }
-    mSourceBits.store(info.bitDepth > 0 ? info.bitDepth : 32, std::memory_order_relaxed);
-    mResampled.store(info.outputSampleRateHz != info.sampleRateHz, std::memory_order_relaxed);
-    applyReplayGain();
+    auto publishInfo = [&](const TrackInfo &ti) {
+        {
+            std::lock_guard<std::mutex> lock(mTrackInfoLock);
+            mTrackInfo = ti;
+        }
+        mSourceBits.store(ti.bitDepth > 0 ? ti.bitDepth : 32, std::memory_order_relaxed);
+        mResampled.store(ti.outputSampleRateHz != ti.sampleRateHz, std::memory_order_relaxed);
+        mDecoderTargetRate.store(targetRate, std::memory_order_relaxed);
+        applyReplayGain();
+    };
+    publishInfo(info);
 
     {
         std::lock_guard<std::mutex> lock(mStreamLock);
@@ -134,6 +149,38 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
                 // false return is how a caller knows decode succeeded
                 // and only the native output stream failed to open.
                 return false;
+            }
+
+            // Did the stream really end up at the rate the decoder delivers? If Android's own
+            // mixer is going to resample it (the stream is shared and the mixer runs at another
+            // rate), it is better done here: Resonix's resampler is known, set to the user's
+            // quality, and the output description can say so. The decoder is reopened for the
+            // mixer's rate and the stream follows. Never for the bit-perfect mixer, which has
+            // to be left alone.
+            const int platformRate = (mStreamMode == kOpenStrict) ? 0 : detectPlatformRate(info.outputSampleRateHz);
+            if (platformRate > 0 && platformRate != info.outputSampleRateHz) {
+                LOGI("Android would resample %d -> %d Hz; converting in Resonix instead",
+                     info.outputSampleRateHz, platformRate);
+                closeStreamLocked();
+                active().close();
+                targetRate = platformRate;
+                active().setTargetSampleRate(targetRate);
+                active().setResamplerQuality(mResamplerQuality.load(std::memory_order_relaxed));
+                TrackInfo again;
+                if (!openDecoder(&again) || again.outputSampleRateHz <= 0 || again.channelCount <= 0) {
+                    LOGE("Reopening the track at %d Hz failed: %s", platformRate, label);
+                    return false;
+                }
+                info = again;
+                publishInfo(info);
+                if (openStreamLocked(info.outputSampleRateHz, info.channelCount) != oboe::Result::OK) {
+                    return false;
+                }
+                mLearnedPlatformRate.store(platformRate, std::memory_order_relaxed);
+                std::string note = " · Resonix resampled " + describeSampleRate(info.sampleRateHz) + " → " +
+                                   describeSampleRate(info.outputSampleRateHz);
+                std::lock_guard<std::mutex> infoLock(mTrackInfoLock);
+                mOutputDescription += note;
             }
         }
     }
@@ -202,12 +249,13 @@ bool AudioEngine::ensureStreamStartedLocked() {
 }
 
 void AudioEngine::seekTo(int64_t positionMs) {
-    // Handed off to the decode thread rather than touching mDecoder
+    // Handed off to the decode thread rather than touching the decoder
     // here directly — see the threading contract in AudioEngine.h.
     mPendingSeekMs.store(std::max<int64_t>(0, positionMs), std::memory_order_relaxed);
 }
 
-int64_t AudioEngine::getCurrentPositionMs() const {
+int64_t AudioEngine::getCurrentPositionMs() {
+    promoteIfCrossed();
     int32_t sampleRate;
     int32_t channels;
     int64_t durationMs;
@@ -217,7 +265,8 @@ int64_t AudioEngine::getCurrentPositionMs() const {
         channels = mTrackInfo.channelCount;
         durationMs = mTrackInfo.durationMs;
     }
-    int64_t decodedMs = mDecoder->getCurrentPositionMs();
+    AudioDecoder &decoder = active();
+    int64_t decodedMs = decoder.getCurrentPositionMs();
     if (sampleRate <= 0 || channels <= 0) {
         return decodedMs;
     }
@@ -229,15 +278,28 @@ int64_t AudioEngine::getCurrentPositionMs() const {
         return durationMs > 0 ? std::min(pendingSeek, durationMs) : pendingSeek;
     }
 
+    // A gapless hand-over is queued behind the song being heard: the decoder is already on the
+    // next track, but the listener is still in the old one, a known distance before the boundary.
+    const uint64_t boundary = mBoundaryIndex.load(std::memory_order_acquire);
+    if (boundary != kNoBoundary) {
+        const uint64_t readIdx = mRingBuffer->readIndex();
+        if (readIdx < boundary) {
+            const int64_t toBoundaryMs = static_cast<int64_t>((boundary - readIdx) / static_cast<uint64_t>(channels)) *
+                                         1000 / sampleRate;
+            return std::max<int64_t>(0, mOldTrackEndMs.load(std::memory_order_relaxed) - toBoundaryMs);
+        }
+    }
+
     size_t queuedSamples = mRingBuffer->availableToRead();
-    if (queuedSamples == 0 && mDecoder->isEndOfStream() && durationMs > 0) {
+    if (queuedSamples == 0 && decoder.isEndOfStream() && durationMs > 0) {
         return durationMs;  // everything decoded has been played
     }
     int64_t queuedMs = static_cast<int64_t>(queuedSamples / static_cast<size_t>(channels)) * 1000 / sampleRate;
     return std::max<int64_t>(0, decodedMs - queuedMs);
 }
 
-TrackInfo AudioEngine::getAudioTrackInfo() const {
+TrackInfo AudioEngine::getAudioTrackInfo() {
+    promoteIfCrossed();
     std::lock_guard<std::mutex> lock(mTrackInfoLock);
     return mTrackInfo;
 }
@@ -268,13 +330,7 @@ void AudioEngine::setReplayGainMode(int mode) {
     applyReplayGain();
 }
 
-void AudioEngine::applyReplayGain() {
-    TrackInfo info;
-    {
-        std::lock_guard<std::mutex> lock(mTrackInfoLock);
-        info = mTrackInfo;
-    }
-
+double AudioEngine::replayGainFor(const TrackInfo &info) const {
     bool have = false;
     double gainDb = 0.0;
     double peak = 1.0;
@@ -307,7 +363,27 @@ void AudioEngine::applyReplayGain() {
         !mLimiterEnabled.load(std::memory_order_relaxed)) {
         linear = 1.0 / peak;  // the tag's own clipping protection
     }
-    mDsp.setReplayGain(linear);
+    return linear;
+}
+
+void AudioEngine::applyReplayGain() {
+    // The track being heard: the current one, or — once the audio thread has crossed a gapless
+    // boundary but nobody has promoted it yet — the one that followed it.
+    double audible;
+    double next = 1.0;
+    bool haveNext = false;
+    {
+        std::lock_guard<std::mutex> lock(mTrackInfoLock);
+        audible = replayGainFor(mPromotePending.load(std::memory_order_acquire) ? mNextInfo : mTrackInfo);
+        if (mNextReady.load(std::memory_order_acquire)) {
+            next = replayGainFor(mNextInfo);
+            haveNext = true;
+        }
+    }
+    mDsp.setReplayGain(audible);
+    if (haveNext) {
+        mNextReplayGain.store(next, std::memory_order_relaxed);
+    }
 }
 
 void AudioEngine::setOutputConfig(int api, bool exclusive, bool bitPerfect) {
@@ -321,6 +397,8 @@ void AudioEngine::setOutputConfig(int api, bool exclusive, bool bitPerfect) {
     if (!changed) {
         return;
     }
+
+    mLearnedPlatformRate.store(0, std::memory_order_relaxed);  // another API / sharing mode behaves differently
 
     std::lock_guard<std::mutex> lock(mStreamLock);
     if (!mStream) {
@@ -356,6 +434,18 @@ void AudioEngine::setOutputPlan(int deviceId, int forcedRateHz, int formatPref, 
     mNativeRate.store(nativeRateHz > 0 ? nativeRateHz : kFixedOutputRate, std::memory_order_relaxed);
     if (streamShapeChanged) {
         mPlanGeneration.fetch_add(1, std::memory_order_relaxed);  // the next track reopens the stream
+        mLearnedPlatformRate.store(0, std::memory_order_relaxed);
+    }
+}
+
+void AudioEngine::setPlatformMixerRate(int hz, int routeKey) {
+    hz = std::max(0, hz);
+    const bool changed = mPlatformMixerRate.load(std::memory_order_relaxed) != hz ||
+                         mPlatformRouteKey.load(std::memory_order_relaxed) != routeKey;
+    mPlatformMixerRate.store(hz, std::memory_order_relaxed);
+    mPlatformRouteKey.store(routeKey, std::memory_order_relaxed);
+    if (changed) {
+        mLearnedPlatformRate.store(0, std::memory_order_relaxed);  // a different device: learn again
     }
 }
 
@@ -395,31 +485,41 @@ oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCo
     }
 
     // Attempts, most faithful first. While a bit-perfect mixer is engaged the first attempts are
-    // "strict" (exact format, no conversion, no resampling anywhere); the last resort is a plain stream.
-    struct Attempt { int deviceId; int format; bool strict; };
-    Attempt attempts[6];
+    // "strict" (exact format, no conversion, no resampling anywhere). Otherwise the stream is first
+    // opened "exact": Oboe does no sample-rate conversion of its own, so a stream that does not get
+    // the requested rate is noticed (and handled by Resonix) instead of being resampled behind our
+    // back. Only if that cannot open at all is Oboe allowed to convert the rate as well.
+    struct Attempt { int deviceId; int format; int mode; };
+    Attempt attempts[12];
     int count = 0;
-    attempts[count++] = {deviceId, wanted, bitPerfectMixer};
-    if (deviceId > 0) attempts[count++] = {0, wanted, bitPerfectMixer};  // the DAC vanished / refused
+    auto addLoose = [&](int device, int format) {
+        attempts[count++] = {device, format, kOpenExact};
+        attempts[count++] = {device, format, kOpenLenient};
+    };
     if (bitPerfectMixer) {
-        attempts[count++] = {deviceId, wanted, false};
-        attempts[count++] = {0, wanted, false};
+        attempts[count++] = {deviceId, wanted, kOpenStrict};
+        if (deviceId > 0) attempts[count++] = {0, wanted, kOpenStrict};  // the DAC vanished / refused
+        addLoose(deviceId, wanted);
+        if (deviceId > 0) addLoose(0, wanted);
+    } else {
+        addLoose(deviceId, wanted);
+        if (deviceId > 0) addLoose(0, wanted);
     }
-    if (wanted != kFormatFloat) attempts[count++] = {0, kFormatFloat, false};
+    if (wanted != kFormatFloat) addLoose(0, kFormatFloat);
 
     oboe::Result result = oboe::Result::ErrorInternal;
     for (int i = 0; i < count; i++) {
         const Attempt &a = attempts[i];
         for (oboe::AudioApi candidate : {first, second}) {
-            result = tryOpenStream(sampleRate, channelCount, candidate, exclusive, a.deviceId, a.format, a.strict);
+            result = tryOpenStream(sampleRate, channelCount, candidate, exclusive, a.deviceId, a.format, a.mode);
             if (result == oboe::Result::OK) {
                 mStreamApiSetting = api;
                 mStreamExclusiveSetting = exclusive;
                 mStreamPlanGeneration = generation;
                 return result;
             }
-            LOGW("Open (api=%s, device=%d, format=%d, strict=%d) failed at %d Hz / %d ch: %s",
-                 oboe::convertToText(candidate), a.deviceId, a.format, a.strict ? 1 : 0, sampleRate,
+            LOGW("Open (api=%s, device=%d, format=%d, mode=%d) failed at %d Hz / %d ch: %s",
+                 oboe::convertToText(candidate), a.deviceId, a.format, a.mode, sampleRate,
                  channelCount, oboe::convertToText(result));
         }
     }
@@ -427,7 +527,8 @@ oboe::Result AudioEngine::openStreamLocked(int32_t sampleRate, int32_t channelCo
 }
 
 oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount, oboe::AudioApi audioApi,
-                                        bool exclusive, int deviceId, int format, bool strict) {
+                                        bool exclusive, int deviceId, int format, int mode) {
+    const bool strict = (mode == kOpenStrict);
     oboe::AudioFormat oboeFormat = oboe::AudioFormat::Float;
     switch (format) {
         case kFormatI16: oboeFormat = oboe::AudioFormat::I16; break;
@@ -454,8 +555,11 @@ oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount
                 ->setPerformanceMode(oboe::PerformanceMode::None)
                 ->setSharingMode(oboe::SharingMode::Shared);
     } else {
+        // Format conversion stays allowed (a device that only speaks 16-bit still plays); the
+        // sample rate is converted by Oboe only in the lenient last resort — see openStreamLocked().
         builder.setFormatConversionAllowed(true)
-                ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Best)
+                ->setSampleRateConversionQuality(mode == kOpenLenient ? oboe::SampleRateConversionQuality::Best
+                                                                      : oboe::SampleRateConversionQuality::None)
                 ->setPerformanceMode(exclusive ? oboe::PerformanceMode::LowLatency
                                                : oboe::PerformanceMode::None)
                 ->setSharingMode(exclusive ? oboe::SharingMode::Exclusive : oboe::SharingMode::Shared);
@@ -473,16 +577,20 @@ oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount
         return result;
     }
 
+    mStreamMode = mode;
+    // Android 14+ (AAudio only): the sample rate of the device itself, which is what the audio
+    // really leaves at. Everything older reports 0 here.
+    mHardwareRateHz = std::max<int32_t>(0, mStream->getHardwareSampleRate());
+
     // Exclusive mode is a request AAudio may not grant — logged because it
-    // directly determines bit-perfect-ness. The requested sample rate can also,
-    // in rare cases, not be granted exactly; the decoder already delivers exactly
-    // what we asked for, so a mismatch means the output path resampled, not us.
-    LOGI("Stream opened: api=%s, sharingMode=%s, device=%d, requested %dHz/%dch/%s, granted %dHz/%dch/%s",
+    // directly determines bit-perfect-ness. The requested sample rate can also
+    // not be granted: then startPlayback() converts in the decoder, see detectPlatformRate().
+    LOGI("Stream opened: api=%s, sharingMode=%s, device=%d, requested %dHz/%dch/%s, granted %dHz/%dch/%s, hardware %dHz",
          oboe::convertToText(mStream->getAudioApi()),
          oboe::convertToText(mStream->getSharingMode()),
          mStream->getDeviceId(), sampleRate, channelCount, oboe::convertToText(oboeFormat),
          mStream->getSampleRate(), mStream->getChannelCount(),
-         oboe::convertToText(mStream->getFormat()));
+         oboe::convertToText(mStream->getFormat()), mHardwareRateHz);
 
     // What the audio callback must write: whatever the stream says it wants.
     int activeFormat = kFormatFloat;
@@ -525,13 +633,31 @@ oboe::Result AudioEngine::tryOpenStream(int32_t sampleRate, int32_t channelCount
         case kFormatI32: description += " · 32-bit"; break;
         default: description += " · float"; break;
     }
-    if (strict) description += " · Bit-perfect";
+    if (strict) {
+        description += " · Bit-perfect";
+    } else if (mHardwareRateHz > 0 && mHardwareRateHz == mStream->getSampleRate()) {
+        description += " · device " + describeSampleRate(mHardwareRateHz);  // confirmed by Android, not assumed
+    }
     {
         std::lock_guard<std::mutex> lock(mTrackInfoLock);
         mOutputDescription = description;
     }
 
     return oboe::Result::OK;
+}
+
+int AudioEngine::detectPlatformRate(int requestedRate) const {
+    if (!mStream) return 0;
+    // 1. The stream itself came back at another rate (only without Oboe's own conversion).
+    const int granted = mStream->getSampleRate();
+    if (granted > 0 && granted != requestedRate) return granted;
+    // 2. Android 14+ tells us the rate of the device: if it is not ours, the mixer converts.
+    if (mHardwareRateHz > 0) return mHardwareRateHz != granted ? mHardwareRateHz : 0;
+    // 3. Older Android cannot say. A *shared* stream is mixed at the route's mixer rate, which is
+    //    known for the built-in outputs (Kotlin passes it); an exclusive (MMAP) stream is not mixed.
+    const int mixer = mPlatformMixerRate.load(std::memory_order_relaxed);
+    if (mixer > 0 && mixer != granted && mStream->getSharingMode() == oboe::SharingMode::Shared) return mixer;
+    return 0;
 }
 
 void AudioEngine::closeStreamLocked() {
@@ -546,14 +672,15 @@ void AudioEngine::startDecodeThread() {
     if (mDecodeThreadRunning.load(std::memory_order_relaxed)) {
         return;
     }
-    mDecoder->setAbort(false);
+    mDecoders[0]->setAbort(false);
+    mDecoders[1]->setAbort(false);
     mDecodeThreadRunning.store(true, std::memory_order_relaxed);
     mDecodeThread = std::thread(&AudioEngine::decodeThreadLoop, this);
 }
 
 void AudioEngine::stopDecodeThread() {
     mDecodeThreadRunning.store(false, std::memory_order_relaxed);
-    mDecoder->setAbort(true);  // unblock a decodeInto() waiting for buffer space
+    active().setAbort(true);  // unblock a decodeInto() waiting for buffer space
     if (mDecodeThread.joinable()) {
         mDecodeThread.join();
     }
@@ -563,11 +690,19 @@ void AudioEngine::decodeThreadLoop() {
     using namespace std::chrono_literals;
 
     while (mDecodeThreadRunning.load(std::memory_order_relaxed)) {
+        retireIfDone();
+
         int64_t pendingSeek = mPendingSeekMs.load(std::memory_order_relaxed);
         if (pendingSeek >= 0) {
+            // A seek always means "in the song being heard". If the decoder has already moved on to
+            // the next track (gapless), go back to the old one first; the ring then holds the old
+            // song's tail followed by the next song, so all of it is discarded.
+            if (revertGaplessIfPending()) {
+                mRingBuffer->flushFromProducer();
+            }
             // Only throw the queued audio away if the seek actually happened —
             // flushing after a failed seek would just skip content.
-            if (mDecoder->seekTo(pendingSeek)) {
+            if (active().seekTo(pendingSeek)) {
                 mRingBuffer->flushFromProducer();
             }
             // A newer request that arrived meanwhile stays pending.
@@ -584,13 +719,173 @@ void AudioEngine::decodeThreadLoop() {
             continue;
         }
 
-        bool more = mDecoder->decodeInto(*mRingBuffer);
+        bool more = active().decodeInto(*mRingBuffer);
         if (!more) {
-            // End of stream reached and flushed; nothing left to decode
-            // until the next playTrack()/seekTo().
-            std::this_thread::sleep_for(20ms);
+            // End of stream reached and flushed. If the next track is prepared, carry straight on
+            // with it (gapless); otherwise nothing is left to decode until the next
+            // playTrack()/seekTo().
+            if (!trySwitchToNext()) {
+                std::this_thread::sleep_for(20ms);
+            }
         }
     }
+}
+
+// ---- Gapless -------------------------------------------------------------------------------
+
+bool AudioEngine::prepareNextFd(int fd) {
+    if (fd < 0) return false;
+    promoteIfCrossed();
+    if (mLoading.load(std::memory_order_relaxed)) return false;
+
+    std::lock_guard<std::mutex> opLock(mNextOpLock);
+    if (mBoundaryIndex.load(std::memory_order_acquire) != kNoBoundary ||
+        mPromotePending.load(std::memory_order_acquire)) {
+        return false;  // a hand-over is already under way: wait for it to be reported
+    }
+
+    TrackInfo current;
+    {
+        std::lock_guard<std::mutex> lock(mTrackInfoLock);
+        current = mTrackInfo;
+    }
+    if (current.outputSampleRateHz <= 0 || current.channelCount <= 0) {
+        return false;  // nothing is loaded
+    }
+
+    // The idle slot may still hold an older prepared track or the decoder of the song before.
+    mNextReady.store(false, std::memory_order_release);
+    mRetiredDecoder.store(-1, std::memory_order_relaxed);
+    AudioDecoder &next = *mDecoders[1 - mActive.load(std::memory_order_acquire)];
+    next.close();
+    next.setAbort(false);
+    next.setTargetSampleRate(mDecoderTargetRate.load(std::memory_order_relaxed));
+    next.setResamplerQuality(mResamplerQuality.load(std::memory_order_relaxed));
+
+    TrackInfo info;
+    if (!next.openFd(fd, &info)) {
+        next.close();
+        return false;
+    }
+    if (info.outputSampleRateHz <= 0) {
+        info.outputSampleRateHz = info.sampleRateHz;
+    }
+    // Same stream or no gapless: a different rate or channel count needs the output stream
+    // reopened, which is exactly the gap this is meant to avoid.
+    if (info.outputSampleRateHz != current.outputSampleRateHz || info.channelCount != current.channelCount) {
+        LOGI("Next track is %d Hz / %d ch, stream is %d Hz / %d ch — not gapless",
+             info.outputSampleRateHz, info.channelCount, current.outputSampleRateHz, current.channelCount);
+        next.close();
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mTrackInfoLock);
+        mNextInfo = info;
+        mNextReplayGain.store(replayGainFor(info), std::memory_order_relaxed);
+    }
+    mNextSourceBits.store(info.bitDepth > 0 ? info.bitDepth : 32, std::memory_order_relaxed);
+    mNextResampled.store(info.outputSampleRateHz != info.sampleRateHz, std::memory_order_relaxed);
+    mNextReady.store(true, std::memory_order_release);
+    return true;
+}
+
+bool AudioEngine::cancelNext() {
+    std::lock_guard<std::mutex> opLock(mNextOpLock);
+    if (mBoundaryIndex.load(std::memory_order_acquire) != kNoBoundary ||
+        mPromotePending.load(std::memory_order_acquire)) {
+        return false;  // too late: the hand-over has happened
+    }
+    if (mNextReady.exchange(false, std::memory_order_acq_rel)) {
+        mDecoders[1 - mActive.load(std::memory_order_acquire)]->close();
+    }
+    return true;
+}
+
+bool AudioEngine::consumeGaplessAdvance() {
+    promoteIfCrossed();
+    return mGaplessAdvanced.exchange(false, std::memory_order_acq_rel);
+}
+
+bool AudioEngine::trySwitchToNext() {
+    if (!mNextReady.load(std::memory_order_acquire)) return false;
+    std::unique_lock<std::mutex> lock(mNextOpLock, std::try_to_lock);
+    if (!lock.owns_lock() || !mNextReady.load(std::memory_order_acquire)) {
+        return false;  // a prepare is still opening the file: try again in a moment
+    }
+    const int current = mActive.load(std::memory_order_relaxed);
+    mOldTrackEndMs.store(mDecoders[current]->getCurrentPositionMs(), std::memory_order_relaxed);
+    mRetiredDecoder.store(current, std::memory_order_relaxed);
+    // Everything of the old track is in the ring by now: that is where the boundary lies. The
+    // boundary is published first, so a reader can never pass it without seeing it.
+    mBoundaryIndex.store(mRingBuffer->writeIndex(), std::memory_order_release);
+    mActive.store(1 - current, std::memory_order_release);
+    mNextReady.store(false, std::memory_order_release);
+    return true;
+}
+
+bool AudioEngine::revertGaplessIfPending() {
+    std::lock_guard<std::mutex> lock(mNextOpLock);
+    uint64_t boundary = mBoundaryIndex.load(std::memory_order_acquire);
+    if (boundary == kNoBoundary) return false;
+    // Whoever clears the boundary first wins: if the audio thread got there, the next track is
+    // already being heard and the seek belongs to it.
+    if (!mBoundaryIndex.compare_exchange_strong(boundary, kNoBoundary, std::memory_order_acq_rel)) return false;
+    const int retired = mRetiredDecoder.load(std::memory_order_relaxed);
+    const int current = mActive.load(std::memory_order_relaxed);
+    if (retired < 0 || retired == current) return false;  // cannot happen; leave things as they are
+    mActive.store(retired, std::memory_order_release);
+    mDecoders[current]->close();  // the next track will have to be prepared again
+    mRetiredDecoder.store(-1, std::memory_order_relaxed);
+    mNextReady.store(false, std::memory_order_release);
+    return true;
+}
+
+void AudioEngine::retireIfDone() {
+    if (mRetiredDecoder.load(std::memory_order_relaxed) < 0 ||
+        mBoundaryIndex.load(std::memory_order_acquire) != kNoBoundary) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(mNextOpLock, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    const int retired = mRetiredDecoder.load(std::memory_order_relaxed);
+    if (retired < 0 || mBoundaryIndex.load(std::memory_order_acquire) != kNoBoundary) return;
+    mDecoders[retired]->close();  // its song has been heard to the end
+    mRetiredDecoder.store(-1, std::memory_order_relaxed);
+}
+
+void AudioEngine::clearGaplessLocked() {
+    std::lock_guard<std::mutex> lock(mNextOpLock);
+    mBoundaryIndex.store(kNoBoundary, std::memory_order_release);
+    mPromotePending.store(false, std::memory_order_release);
+    mGaplessAdvanced.store(false, std::memory_order_release);
+    mNextReady.store(false, std::memory_order_release);
+    mRetiredDecoder.store(-1, std::memory_order_relaxed);
+    mDecoders[1 - mActive.load(std::memory_order_acquire)]->close();
+    std::lock_guard<std::mutex> infoLock(mTrackInfoLock);
+    mNextInfo = TrackInfo{};
+}
+
+void AudioEngine::onBoundaryCrossed(uint64_t boundary) {
+    uint64_t expected = boundary;
+    if (!mBoundaryIndex.compare_exchange_strong(expected, kNoBoundary, std::memory_order_acq_rel)) {
+        return;  // a seek went back to the old track first
+    }
+    // From this sample on, the listener hears the next track: switch what depends on the track.
+    // Atomics only — this runs on the real-time audio thread.
+    mDsp.setReplayGain(mNextReplayGain.load(std::memory_order_relaxed));
+    mSourceBits.store(mNextSourceBits.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    mResampled.store(mNextResampled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    mPromotePending.store(true, std::memory_order_release);
+}
+
+void AudioEngine::promoteIfCrossed() {
+    if (!mPromotePending.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(mTrackInfoLock);
+    if (!mPromotePending.load(std::memory_order_relaxed)) return;  // another thread was first
+    mTrackInfo = mNextInfo;
+    mPromotePending.store(false, std::memory_order_release);
+    mGaplessAdvanced.store(true, std::memory_order_release);
 }
 
 int32_t AudioEngine::renderBlock(void *out, int32_t maxFrames, int32_t channelCount, int format) {
@@ -606,14 +901,45 @@ int32_t AudioEngine::renderBlock(void *out, int32_t maxFrames, int32_t channelCo
     int32_t framesToProcess = std::min(maxFrames, std::max(maxFramesInScratch, 0));
     size_t samplesNeeded = static_cast<size_t>(framesToProcess) * static_cast<size_t>(channelCount);
 
-    size_t gotSamples = framesToProcess > 0
-            ? mRingBuffer->read(mReadScratch.data(), samplesNeeded)
-            : 0;
-    size_t framesGot = gotSamples / static_cast<size_t>(channelCount);
-    gotSamples = framesGot * static_cast<size_t>(channelCount);
+    // Read and process in one or two pieces: if a gapless boundary (the first sample of the next
+    // track) lies inside this block, the part before it is processed with the old track's settings
+    // and the part after it with the new one's, so ReplayGain changes at exactly the right sample.
+    size_t gotSamples = 0;
+    bool neutral = true;
+    auto readPiece = [&](size_t want) -> size_t {
+        size_t got = mRingBuffer->read(mReadScratch.data() + gotSamples, want);
+        const size_t frames = got / static_cast<size_t>(channelCount);
+        got = frames * static_cast<size_t>(channelCount);
+        // Double-precision DSP chain (Dsp.h), still ahead of the final quantiser.
+        mDsp.process(mReadScratch.data() + gotSamples, frames, channelCount);
+        neutral = neutral && mDsp.lastBlockWasNeutral();
+        gotSamples += got;
+        return got;
+    };
 
-    // Double-precision DSP chain (Dsp.h), still ahead of the final quantiser.
-    mDsp.process(mReadScratch.data(), framesGot, channelCount);
+    if (framesToProcess > 0) {
+        size_t firstPiece = samplesNeeded;
+        bool crossInside = false;
+        const uint64_t boundary = mBoundaryIndex.load(std::memory_order_acquire);
+        if (boundary != kNoBoundary) {
+            const uint64_t readIdx = mRingBuffer->readIndex();
+            if (readIdx >= boundary) {
+                onBoundaryCrossed(boundary);  // the next track starts with this very block
+            } else if (boundary - readIdx < samplesNeeded) {
+                firstPiece = static_cast<size_t>(boundary - readIdx);
+                firstPiece -= firstPiece % static_cast<size_t>(channelCount);  // whole frames
+                crossInside = firstPiece > 0;
+            }
+        }
+        const size_t got1 = readPiece(firstPiece);
+        if (crossInside && got1 == firstPiece) {
+            onBoundaryCrossed(boundary);
+            readPiece(samplesNeeded - firstPiece);
+        }
+    } else {
+        mDsp.process(mReadScratch.data(), 0, channelCount);
+        neutral = mDsp.lastBlockWasNeutral();
+    }
 
     // Dither only where it helps: into a 16- or 24-bit output, and only when the samples are not
     // already exactly on that output's grid. An untouched 16-bit file played at its own rate to a
@@ -621,7 +947,7 @@ int32_t AudioEngine::renderBlock(void *out, int32_t maxFrames, int32_t channelCo
     bool dither = false;
     if (format == kFormatI16 || format == kFormatI24) {
         const int mode = mDitherMode.load(std::memory_order_relaxed);
-        const bool onGrid = mDsp.lastBlockWasNeutral() &&
+        const bool onGrid = neutral &&
                             !mResampled.load(std::memory_order_relaxed) &&
                             mSourceBits.load(std::memory_order_relaxed) <= bitsOfFormat(format);
         dither = (mode == kDitherAlways) || (mode == kDitherAuto && !onGrid);
@@ -677,7 +1003,8 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     // new track is being loaded, or a seek (which rewinds the decoder) is on its way.
     bool trackDone = !mLoading.load(std::memory_order_relaxed) &&
                      mPendingSeekMs.load(std::memory_order_relaxed) < 0 &&
-                     mDecoder->isEndOfStream() && mRingBuffer->availableToRead() == 0;
+                     !mNextReady.load(std::memory_order_acquire) &&  // a prepared track is about to take over
+                     active().isEndOfStream() && mRingBuffer->availableToRead() == 0;
     if (trackDone) {
         mIsPlaying.store(false, std::memory_order_relaxed);
         mTrackFinishedEvent.store(true, std::memory_order_relaxed);
@@ -691,7 +1018,8 @@ int32_t AudioEngine::pullProcessedFrames(float *out, int32_t maxFrames, int32_t 
     int32_t framesWritten = renderBlock(out, maxFrames, channelCount, kFormatFloat);
 
     bool trackDone = mPendingSeekMs.load(std::memory_order_relaxed) < 0 &&
-                     mDecoder->isEndOfStream() && mRingBuffer->availableToRead() == 0;
+                     !mNextReady.load(std::memory_order_acquire) &&
+                     active().isEndOfStream() && mRingBuffer->availableToRead() == 0;
     if (trackDone) {
         mIsPlaying.store(false, std::memory_order_relaxed);
         mTrackFinishedEvent.store(true, std::memory_order_relaxed);

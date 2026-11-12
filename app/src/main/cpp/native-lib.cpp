@@ -93,6 +93,48 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeConsumeTrackFinished(
     return (engine != nullptr && engine->consumeTrackFinishedEvent()) ? JNI_TRUE : JNI_FALSE;
 }
 
+// --- Gapless -------------------------------------------------------------------------
+
+JNIEXPORT jboolean JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativePrepareNextFd(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint fd) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine == nullptr || fd < 0) {
+        return JNI_FALSE;
+    }
+    return engine->prepareNextFd(static_cast<int>(fd)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeCancelNext(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return (engine != nullptr && engine->cancelNext()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeConsumeGaplessAdvance(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return (engine != nullptr && engine->consumeGaplessAdvance()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeIsNextReady(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return (engine != nullptr && engine->isNextReady()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetPlatformMixerRate(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jint hz, jint routeKey) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setPlatformMixerRate(static_cast<int>(hz), static_cast<int>(routeKey));
+    }
+}
+
 // --- Track info getters -----------------------------------------------
 // Kept as individual primitive-returning functions and assembled into
 // an AudioTrackInfo on the Kotlin side (NativeAudioEngine.kt), rather

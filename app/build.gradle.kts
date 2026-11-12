@@ -30,6 +30,21 @@ android {
         }
     }
 
+    // Release signing comes from the environment (the release workflow sets these from repository
+    // secrets; locally export them to build a signed release). Without them the release build is
+    // simply left unsigned, exactly as before.
+    val releaseKeystore: String? = System.getenv("RESONIX_KEYSTORE_PATH")
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("RESONIX_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RESONIX_KEY_ALIAS")
+                keyPassword = System.getenv("RESONIX_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -37,6 +52,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         debug {
             isMinifyEnabled = false
@@ -71,6 +89,12 @@ kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.fromTarget("17")
     }
+}
+
+// Room writes the database schema of every version here; commit these files, migrations are
+// written and tested against them (see data/Migrations.kt).
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

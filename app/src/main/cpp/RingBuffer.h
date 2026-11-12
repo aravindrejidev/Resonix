@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 
 namespace resonix {
@@ -22,8 +24,14 @@ namespace resonix {
 // at the point of indexing into mBuffer via modulo. This sidesteps the
 // classic "how do you tell full from empty" ambiguity of a circular
 // buffer that wraps its indices, at the cost of indices that are
-// logically unbounded (safe in practice: at 48kHz stereo, a 64-bit
-// index would take tens of millions of years to wrap).
+// logically unbounded. They are explicitly 64-bit: with a 32-bit size_t
+// (armeabi-v7a) the index would wrap after ~3 hours of 192 kHz stereo,
+// and because the capacity is not a power of two the wrap would put the
+// read position in the wrong place. A 64-bit index takes millions of years.
+//
+// The absolute indices are also public ([writeIndex] / [readIndex]): the
+// engine marks the exact sample where one track ends and the next begins
+// (gapless playback) as a write index and notices when the reader passes it.
 class RingBuffer {
 public:
     explicit RingBuffer(size_t capacityInSamples)
@@ -37,14 +45,20 @@ public:
     // actually written; less than count means the buffer is full and
     // the caller should back off briefly and retry.
     size_t write(const double *data, size_t count) {
-        size_t writeIdx = mWriteIndex.load(std::memory_order_relaxed);
-        size_t readIdx = mReadIndex.load(std::memory_order_acquire);
-        size_t used = writeIdx >= readIdx ? writeIdx - readIdx : 0;
-        size_t freeSpace = used < mCapacity ? mCapacity - used : 0;
-        size_t toWrite = std::min(count, freeSpace);
+        const uint64_t writeIdx = mWriteIndex.load(std::memory_order_relaxed);
+        const uint64_t readIdx = mReadIndex.load(std::memory_order_acquire);
+        const uint64_t used = writeIdx >= readIdx ? writeIdx - readIdx : 0;
+        const size_t freeSpace = used < mCapacity ? mCapacity - static_cast<size_t>(used) : 0;
+        const size_t toWrite = std::min(count, freeSpace);
 
-        for (size_t i = 0; i < toWrite; i++) {
-            mBuffer[(writeIdx + i) % mCapacity] = data[i];
+        if (toWrite > 0) {
+            // At most two straight copies (up to the end of the storage, then from its start).
+            const size_t start = static_cast<size_t>(writeIdx % mCapacity);
+            const size_t first = std::min(toWrite, mCapacity - start);
+            std::memcpy(mBuffer.get() + start, data, first * sizeof(double));
+            if (toWrite > first) {
+                std::memcpy(mBuffer.get(), data + first, (toWrite - first) * sizeof(double));
+            }
         }
 
         mWriteIndex.store(writeIdx + toWrite, std::memory_order_release);
@@ -60,16 +74,19 @@ public:
     // out, the exchange fails and the chunk is dropped (reported as an
     // underrun) instead of replaying stale audio or corrupting the indices.
     size_t read(double *data, size_t count) {
-        size_t readIdx = mReadIndex.load(std::memory_order_acquire);
-        size_t writeIdx = mWriteIndex.load(std::memory_order_acquire);
-        size_t available = writeIdx >= readIdx ? writeIdx - readIdx : 0;
-        size_t toRead = std::min(std::min(count, available), mCapacity);
+        uint64_t readIdx = mReadIndex.load(std::memory_order_acquire);
+        const uint64_t writeIdx = mWriteIndex.load(std::memory_order_acquire);
+        const uint64_t available = writeIdx >= readIdx ? writeIdx - readIdx : 0;
+        const size_t toRead = static_cast<size_t>(std::min<uint64_t>(std::min<uint64_t>(count, available), mCapacity));
         if (toRead == 0) {
             return 0;
         }
 
-        for (size_t i = 0; i < toRead; i++) {
-            data[i] = mBuffer[(readIdx + i) % mCapacity];
+        const size_t start = static_cast<size_t>(readIdx % mCapacity);
+        const size_t first = std::min(toRead, mCapacity - start);
+        std::memcpy(data, mBuffer.get() + start, first * sizeof(double));
+        if (toRead > first) {
+            std::memcpy(data + first, mBuffer.get(), (toRead - first) * sizeof(double));
         }
 
         if (!mReadIndex.compare_exchange_strong(readIdx, readIdx + toRead,
@@ -83,10 +100,14 @@ public:
     size_t availableToRead() const {
         // Read index first: it can never pass the write index, so loading
         // the write index second guarantees write >= read here.
-        size_t readIdx = mReadIndex.load(std::memory_order_acquire);
-        size_t writeIdx = mWriteIndex.load(std::memory_order_acquire);
-        return writeIdx >= readIdx ? writeIdx - readIdx : 0;
+        const uint64_t readIdx = mReadIndex.load(std::memory_order_acquire);
+        const uint64_t writeIdx = mWriteIndex.load(std::memory_order_acquire);
+        return writeIdx >= readIdx ? static_cast<size_t>(writeIdx - readIdx) : 0;
     }
+
+    // Absolute positions (samples written / read since construction; never reset by a flush).
+    uint64_t writeIndex() const { return mWriteIndex.load(std::memory_order_acquire); }
+    uint64_t readIndex() const { return mReadIndex.load(std::memory_order_acquire); }
 
     // Discards everything currently buffered. Call it from the producer
     // side only (the decode thread, or whoever is acting as the producer
@@ -109,8 +130,8 @@ public:
 private:
     const size_t mCapacity;
     std::unique_ptr<double[]> mBuffer;
-    std::atomic<size_t> mWriteIndex{0};
-    std::atomic<size_t> mReadIndex{0};
+    std::atomic<uint64_t> mWriteIndex{0};
+    std::atomic<uint64_t> mReadIndex{0};
 };
 
 }  // namespace resonix

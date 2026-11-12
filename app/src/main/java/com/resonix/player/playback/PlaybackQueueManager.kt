@@ -50,6 +50,13 @@ data class NowPlaying(
  * the engine as an open file descriptor — never re-opened by path, which
  * Android denies for content:// documents.
  *
+ * Gapless: once a song is playing, the one after it is opened in the engine ([NativeAudioEngine.prepareNextFd])
+ * so playback runs straight from the end of one into the start of the next. That only happens when
+ * [canPrepareNext] allows it (the setting is on and both songs would use the same output stream); the
+ * engine refuses on its own if the decoded sample rate or channel count differs. When the engine reports
+ * that it has crossed into the prepared song ([checkForAutoAdvance]) the queue position and [nowPlaying]
+ * move on without loading anything.
+ *
  * One instance is meant to be reused for the app's whole session; call
  * [release] when it's no longer needed.
  */
@@ -62,6 +69,8 @@ class PlaybackQueueManager(
      * where and how it should leave the app (output device, sample rate, bit-perfect mode).
      */
     private val beforePlay: (Track) -> Unit = {},
+    /** Whether [next] may be opened ahead of time to follow [current] without a gap. */
+    private val canPrepareNext: (current: Track, next: Track) -> Boolean = { _, _ -> true },
 ) {
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -87,6 +96,10 @@ class PlaybackQueueManager(
     /** Bumped for every load request; only the newest request's result is applied. */
     @Volatile
     private var loadToken: Int = 0
+
+    /** The song the engine last accepted as the gapless follower of the current one. */
+    @Volatile
+    private var preparedNext: Track? = null
 
     private val _nowPlaying = MutableStateFlow<NowPlaying?>(null)
     val nowPlaying: StateFlow<NowPlaying?> = _nowPlaying.asStateFlow()
@@ -144,6 +157,7 @@ class PlaybackQueueManager(
         shuffled = enabled
         currentIndex = current?.let { queue.indexOf(it) }?.takeIf { it >= 0 } ?: 0
         publishNeighbours()
+        schedulePrepareNext()  // the song that follows has changed
     }
 
     fun playNext(): Boolean {
@@ -201,11 +215,17 @@ class PlaybackQueueManager(
             queueFinished = false
             engine.resumeTrack()
         }
+        // A seek back into a song whose end was already handed over to the next one drops that
+        // hand-over inside the engine. Once it has settled, prepare the next song again if needed.
+        mainHandler.postDelayed({
+            if (!released && !_isLoading.value && !engine.isNextReady()) schedulePrepareNext()
+        }, 600L)
     }
 
     /** Call periodically (e.g. alongside position polling). Advances the
      * queue exactly once per track that finished on its own. */
     fun checkForAutoAdvance() {
+        if (engine.consumeGaplessAdvance()) onGaplessAdvance()
         if (!engine.consumeTrackFinishedEvent()) return
         if (_isLoading.value) return  // a load is in flight; its result decides what plays
         if (!playNext()) queueFinished = true  // last track done — the engine has stopped itself
@@ -292,6 +312,7 @@ class PlaybackQueueManager(
                     next = queue.getOrNull(index + 1),
                     info = outcome.info,
                 )
+                schedulePrepareNext()
             }
             is LoadOutcome.Failed -> {
                 pauseWhenLoaded = false
@@ -313,6 +334,62 @@ class PlaybackQueueManager(
         }
         currentIndex++
         playCurrent()  // consecutiveFailures is deliberately left alone: it keeps counting across skips
+    }
+
+    /**
+     * The Gapless setting changed: prepare the next song now, or drop the prepared one. Main thread.
+     */
+    fun refreshGapless() {
+        schedulePrepareNext()
+    }
+
+    /**
+     * The engine has played through the end of the song into the prepared one: move the queue and
+     * the "now playing" state on, exactly as if that song had just been loaded.
+     */
+    private fun onGaplessAdvance() {
+        val track = preparedNext
+        preparedNext = null
+        if (released || _isLoading.value || track == null) return  // a load in flight decides what plays
+        val index = queue.indexOfFirst { it.contentUri == track.contentUri }
+        if (index < 0) return
+        currentIndex = index
+        consecutiveFailures = 0
+        queueFinished = false
+        _nowPlaying.value = NowPlaying(
+            track = queue[index],
+            previous = queue.getOrNull(index - 1),
+            next = queue.getOrNull(index + 1),
+            info = engine.getAudioTrackInfo(),
+        )
+        schedulePrepareNext()
+    }
+
+    /** Opens the song after the current one in the engine, on the loader thread, if that can be gapless. */
+    private fun schedulePrepareNext() {
+        if (released) return
+        val current = queue.getOrNull(currentIndex) ?: return
+        val next = queue.getOrNull(currentIndex + 1)
+        val token = loadToken
+        val allowed = next != null && try {
+            canPrepareNext(current, next)
+        } catch (e: Exception) {
+            Log.w(TAG, "Deciding on gapless playback failed", e)
+            false
+        }
+        loader.execute {
+            if (released || token != loadToken) return@execute  // another song was requested meanwhile
+            if (next == null || !allowed) {
+                engine.cancelNext()  // the engine may still hold the follower of an older queue order
+                return@execute
+            }
+            try {
+                val pfd = appContext.contentResolver.openFileDescriptor(next.contentUri.toUri(), "r") ?: return@execute
+                if (pfd.use { engine.prepareNextFd(it.fd) }) preparedNext = next
+            } catch (e: Exception) {
+                Log.w(TAG, "Preparing ${next.title} to follow gaplessly failed", e)
+            }
+        }
     }
 
     private fun publishNeighbours() {

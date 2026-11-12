@@ -5,7 +5,17 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [Track::class, ScannedFolder::class], version = 3, exportSchema = false)
+/**
+ * The library database: one row per audio file plus the list of folders the user has granted.
+ *
+ * ### Changing the schema
+ * 1. Bump [version] and edit the entities.
+ * 2. Add a `Migration(old, new)` to [Migrations.ALL]. A version bump without one makes Room throw
+ *    on update, on purpose: that is better than silently wiping the user's folder list.
+ * 3. Build once, then commit the new `app/schemas/com.resonix.player.data.AppDatabase/<version>.json`
+ *    that Room exports. Those files are what migrations are written (and tested) against.
+ */
+@Database(entities = [Track::class, ScannedFolder::class], version = 3, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun trackDao(): TrackDao
@@ -22,12 +32,13 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "resonix.db"
                 )
-                    // No Migration objects exist yet and there's no real
-                    // user data to preserve at this stage — clears and
-                    // recreates the DB on a version bump instead of
-                    // crashing. Replace with a proper Migration before
-                    // there's data worth keeping across an update.
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(*Migrations.ALL)
+                    // Versions 1 and 2 were development schemas from before 0.1.0 and never had
+                    // a migration. They are the only ones allowed to be rebuilt from scratch.
+                    .fallbackToDestructiveMigrationFrom(1, 2)
+                    // Installing an older APK over a newer one (a downgrade) cannot be migrated
+                    // either; the library is just rescanned from the folders afterwards.
+                    .fallbackToDestructiveMigrationOnDowngrade()
                     .build()
                     .also { instance = it }
             }

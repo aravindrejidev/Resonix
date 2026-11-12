@@ -83,6 +83,41 @@ class NativeAudioEngine {
         return nativeHandle != 0L && nativeConsumeTrackFinished(nativeHandle)
     }
 
+    /**
+     * Gapless: opens the song that follows the current one so the engine can carry straight on with it
+     * when the current one ends. Same contract as [playTrackFd] for the descriptor (the engine dup()s it).
+     * Returns false if the song cannot follow gaplessly — its output sample rate or channel count differs
+     * from what is playing, or a hand-over is already under way; it then simply plays after the current
+     * song as usual.
+     */
+    fun prepareNextFd(fd: Int): Boolean {
+        return nativeHandle != 0L && nativePrepareNextFd(nativeHandle, fd)
+    }
+
+    /** Forgets the prepared next song. False if it is too late: the engine has already moved on to it. */
+    fun cancelNext(): Boolean {
+        return nativeHandle != 0L && nativeCancelNext(nativeHandle)
+    }
+
+    /** True exactly once after playback has run from the end of one song into the prepared next one. */
+    fun consumeGaplessAdvance(): Boolean {
+        return nativeHandle != 0L && nativeConsumeGaplessAdvance(nativeHandle)
+    }
+
+    /** A next song is opened and waiting (false once handed over, or after a seek dropped it). */
+    fun isNextReady(): Boolean {
+        return nativeHandle != 0L && nativeIsNextReady(nativeHandle)
+    }
+
+    /**
+     * The rate Android mixes everything at on the current output, when that is known ahead of time
+     * (built-in speaker, headphone jack); 0 when it is not. [routeKey] identifies the output so what the
+     * engine has learned about a device is dropped when another one takes over.
+     */
+    fun setPlatformMixerRate(hz: Int, routeKey: Int) {
+        if (nativeHandle != 0L) nativeSetPlatformMixerRate(nativeHandle, hz, routeKey)
+    }
+
     fun getAudioTrackInfo(): AudioTrackInfo {
         if (nativeHandle == 0L) {
             return AudioTrackInfo(0, 0, 0, 0L, 0L, "")
@@ -225,6 +260,11 @@ class NativeAudioEngine {
     private external fun nativeGetCurrentPositionMs(handle: Long): Long
     private external fun nativeIsPlaying(handle: Long): Boolean
     private external fun nativeConsumeTrackFinished(handle: Long): Boolean
+    private external fun nativePrepareNextFd(handle: Long, fd: Int): Boolean
+    private external fun nativeCancelNext(handle: Long): Boolean
+    private external fun nativeConsumeGaplessAdvance(handle: Long): Boolean
+    private external fun nativeIsNextReady(handle: Long): Boolean
+    private external fun nativeSetPlatformMixerRate(handle: Long, hz: Int, routeKey: Int)
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetBitDepth(handle: Long): Int
     private external fun nativeGetChannelCount(handle: Long): Int

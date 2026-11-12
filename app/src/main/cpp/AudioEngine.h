@@ -21,9 +21,18 @@ namespace resonix {
 // Owns the full playback pipeline: AudioDecoder (FFmpeg) on a dedicated
 // decode thread -> RingBuffer (lock-free, double-precision) -> Oboe
 // output stream, whose callback runs the double-precision DSP chain
-// (see Dsp.h: bass shelf, stereo width, balance, DVC x ReplayGain x preamp
-// gain, peak limiter) and converts to 32-bit float right before handing
-// samples to Oboe. The future EQ plugs in ahead of the limiter.
+// (see Dsp.h: equalizer, bass shelf, stereo width, balance, DVC x ReplayGain x
+// preamp gain, peak limiter) and converts to the stream's format right before
+// handing samples to Oboe.
+//
+// Gapless playback: there are two decoders. While one track plays, the next can
+// be opened with prepareNextFd(); when the playing track's decoder reaches the
+// end, the decode thread carries straight on with the prepared one and records
+// the ring-buffer position where the new track starts (the "boundary"). The
+// audio callback notices when it reaches that position, switches the per-track
+// state (ReplayGain, dither facts) at that exact sample, and Kotlin is told with
+// consumeGaplessAdvance(). The two tracks must come out as the same stream
+// (same output rate and channel count) or the prepare is refused.
 //
 // Threading contract:
 //   - AudioDecoder's open()/seekTo()/decodeInto() are only ever called
@@ -34,6 +43,10 @@ namespace resonix {
 //   - seekTo() from the JNI thread does not call into AudioDecoder
 //     itself; it posts a pending-seek request the decode thread picks
 //     up, keeping all AudioDecoder access on that one thread.
+//   - The one exception is the *idle* decoder slot (the prepared next track, or the
+//     retired decoder of a track already played): prepareNextFd() / cancelNext()
+//     open and close it under mNextOpLock, and the decode thread only touches it
+//     under the same lock.
 class AudioEngine : public oboe::AudioStreamDataCallback,
                      public oboe::AudioStreamErrorCallback {
 public:
@@ -66,6 +79,27 @@ public:
     // carry on mid-song after the output device changed). Consumed by that call.
     void setNextStartPosition(int64_t positionMs) { mNextStartMs.store(positionMs, std::memory_order_relaxed); }
 
+    // --- Gapless -------------------------------------------------------------------
+    // Opens the track after the current one on the spare decoder (the engine dup()s [fd]).
+    // Returns true only if it can be played straight after the current track as the *same*
+    // output stream — same output sample rate and channel count — in which case the hand-over
+    // is gapless. False leaves everything as it was and the track simply ends normally.
+    // Replaces an earlier prepared track; refused while a hand-over is already under way.
+    bool prepareNextFd(int fd);
+
+    // Forgets the prepared next track. False if it is too late (the decoder has already moved
+    // on to it) — then consumeGaplessAdvance() will report the advance.
+    bool cancelNext();
+
+    // True exactly once after the audio callback has played through the end of a track and into
+    // the prepared next one; by then getAudioTrackInfo() describes the new track. Poll alongside
+    // consumeTrackFinishedEvent().
+    bool consumeGaplessAdvance();
+
+    // True while a next track is opened and waiting (it is not once the hand-over has happened, nor
+    // after a seek back into the old track dropped it).
+    bool isNextReady() const { return mNextReady.load(std::memory_order_acquire); }
+
     void pauseTrack();
     void resumeTrack();
     void seekTo(int64_t positionMs);
@@ -74,8 +108,8 @@ public:
     // ahead of the speaker (ring buffer), so its own position is corrected
     // by whatever is still queued. While a seek is pending this is the seek
     // target, so the UI jumps there immediately.
-    int64_t getCurrentPositionMs() const;
-    TrackInfo getAudioTrackInfo() const;
+    int64_t getCurrentPositionMs();
+    TrackInfo getAudioTrackInfo();
     bool isPlaying() const { return mIsPlaying.load(std::memory_order_relaxed); }
 
     // Master gain (Direct Volume Control level x audio-focus ducking), linear,
@@ -107,6 +141,14 @@ public:
 
     // Dither (DitherSetting) and resampler quality (0 Standard / 1 High / 2 Maximum).
     void setFidelity(int ditherMode, int resamplerQuality);
+
+    // The rate Android mixes everything at on the current route, when that is known ahead of
+    // time (built-in speaker / headphone jack: PROPERTY_OUTPUT_SAMPLE_RATE); 0 = not known.
+    // [routeKey] identifies the route (AudioDeviceInfo id) so what the engine has learned about a
+    // device is forgotten when another one takes over. A shared stream opened at any other rate
+    // would be resampled by Android's mixer; the engine converts to the mixer's rate itself
+    // instead, with its own (known, configurable) resampler.
+    void setPlatformMixerRate(int hz, int routeKey);
 
     // --- Tools -> Equalizer ----------------------------------------------------------------
     // One cascade: the graphic bands first, then the parametric ones (Kotlin builds the list).
@@ -156,8 +198,17 @@ private:
     // falling back to the other API if the preferred one cannot open at all
     // (a real, if rare, device-specific failure mode).
     oboe::Result openStreamLocked(int32_t sampleRate, int32_t channelCount);
+    // [mode]: how much the stream may do on its own — kOpenStrict (bit-perfect mixer: exact format,
+    // no conversion of any kind), kOpenExact (no sample-rate conversion in Oboe; the engine
+    // converts itself when the stream ends up elsewhere) or kOpenLenient (last resort: Oboe may
+    // convert the rate too).
+    enum OpenMode : int { kOpenStrict = 0, kOpenExact = 1, kOpenLenient = 2 };
     oboe::Result tryOpenStream(int32_t sampleRate, int32_t channelCount, oboe::AudioApi audioApi,
-                               bool exclusive, int deviceId, int format, bool strict);
+                               bool exclusive, int deviceId, int format, int mode);
+
+    // The sample rate Android's own mixer will really play the open stream at, when that differs
+    // from [requestedRate] (0 = it does not / unknown). Needs mStreamLock.
+    int detectPlatformRate(int requestedRate) const;
     void closeStreamLocked();
 
     // Makes sure a stream exists for the loaded track and is running; reopens
@@ -180,7 +231,20 @@ private:
     void stopDecodeThread();
     void decodeThreadLoop();
 
-    std::unique_ptr<AudioDecoder> mDecoder;
+    // Gapless internals (see the class comment).
+    bool trySwitchToNext();          // decode thread: the playing decoder is done, carry on with the prepared one
+    bool revertGaplessIfPending();   // decode thread: a seek arrives while the old track is still audible; true = went back
+    void retireIfDone();             // decode thread: close the decoder of a track that has been played out
+    void clearGaplessLocked();       // decode thread stopped: drop every trace of a prepared / pending next track
+    void onBoundaryCrossed(uint64_t boundary);  // audio thread: the next track's first sample is being read
+    void promoteIfCrossed();         // any non-real-time thread: make the new track the current one
+    double replayGainFor(const TrackInfo &info) const;
+
+    // Two decoders: the active one feeds the ring buffer, the other one is idle or holds the
+    // prepared next track.
+    std::unique_ptr<AudioDecoder> mDecoders[2];
+    std::atomic<int> mActive{0};
+    AudioDecoder &active() const { return *mDecoders[mActive.load(std::memory_order_acquire)]; }
     std::unique_ptr<RingBuffer> mRingBuffer;
     static constexpr size_t kRingBufferCapacitySamples = 192000 * 2 * 2;  // ~2s @ 192kHz stereo
     static constexpr size_t kLowWaterMarkSamples = kRingBufferCapacitySamples / 4;
@@ -205,6 +269,24 @@ private:
     // while its buffer has just been flushed.
     std::atomic<bool> mLoading{false};
 
+    // --- Gapless state -------------------------------------------------------------------
+    static constexpr uint64_t kNoBoundary = ~uint64_t{0};
+    std::mutex mNextOpLock;                          // prepare / cancel / switch / revert never overlap
+    std::atomic<bool> mNextReady{false};             // the idle decoder holds a prepared next track
+    TrackInfo mNextInfo;                             // guarded by mTrackInfoLock
+    std::atomic<double> mNextReplayGain{1.0};
+    std::atomic<int> mNextSourceBits{32};
+    std::atomic<bool> mNextResampled{false};
+    // Ring write index at which the next track's audio starts; kNoBoundary = none pending. The
+    // decode thread sets it, and either the audio thread (the reader got there) or the decode
+    // thread (a seek went back) clears it with a compare-exchange, so exactly one of them wins.
+    std::atomic<uint64_t> mBoundaryIndex{kNoBoundary};
+    std::atomic<bool> mPromotePending{false};        // crossed, but mTrackInfo not yet replaced
+    std::atomic<int64_t> mOldTrackEndMs{0};          // where the track before the boundary ends
+    std::atomic<int> mRetiredDecoder{-1};            // decoder of the track before the boundary
+    std::atomic<bool> mGaplessAdvanced{false};
+    std::atomic<int> mDecoderTargetRate{0};          // target rate the active decoder was opened with
+
     // Output plan + fidelity (any thread).
     std::atomic<int> mDeviceId{0};
     std::atomic<int> mForcedRate{0};
@@ -212,10 +294,15 @@ private:
     std::atomic<bool> mBitPerfectMixer{false};
     std::atomic<int> mNativeRate{kFixedOutputRate};
     std::atomic<int> mPlanGeneration{0};
+    std::atomic<int> mPlatformMixerRate{0};       // see setPlatformMixerRate()
+    std::atomic<int> mPlatformRouteKey{0};
+    std::atomic<int> mLearnedPlatformRate{0};     // rate Android was seen to resample to on this route
     std::atomic<int> mDitherMode{kDitherAuto};
     std::atomic<int> mResamplerQuality{1};
     // What the open stream was opened with (guarded by mStreamLock).
     int mStreamPlanGeneration = -1;
+    int mStreamMode = kOpenLenient;
+    int mHardwareRateHz = 0;                      // Android 14+: the rate of the device itself
 
     // Describes the open stream to the audio thread.
     std::atomic<int> mActiveFormat{kFormatFloat};
