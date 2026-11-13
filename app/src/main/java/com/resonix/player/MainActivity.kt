@@ -52,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.resonix.player.data.PlaylistTrack
 import com.resonix.player.data.Track
 import com.resonix.player.ui.PlayerViewModel
 import com.resonix.player.ui.SettingsState
@@ -59,11 +60,13 @@ import com.resonix.player.ui.components.FloatingNavBar
 import com.resonix.player.ui.components.MiniPlayer
 import com.resonix.player.ui.components.NavTab
 import com.resonix.player.ui.components.NeoToast
+import com.resonix.player.ui.components.TrackActionsSheet
 import com.resonix.player.util.AppMessages
 import kotlinx.coroutines.delay
 import com.resonix.player.ui.neo.neoBackground
 import com.resonix.player.ui.screens.HomeScreen
 import com.resonix.player.ui.screens.NowPlayingScreen
+import com.resonix.player.ui.screens.PlaylistsScreen
 import com.resonix.player.ui.screens.SearchScreen
 import com.resonix.player.ui.screens.SettingsPage
 import com.resonix.player.ui.screens.SettingsScreen
@@ -93,7 +96,8 @@ class MainActivity : ComponentActivity() {
 
 /**
  * Three tabs (Home, Tools, Settings) behind a floating neumorphic bar, a mini player above it,
- * and two full-screen overlays: Search and Now Playing.
+ * the Playlists section that opens over them (under the mini player and the bar), two full-screen
+ * overlays — Search and Now Playing — and the actions sheet of a song.
  */
 @Composable
 private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
@@ -104,6 +108,10 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     var tab by rememberSaveable { mutableStateOf(NavTab.HOME) }
     var showNowPlaying by rememberSaveable { mutableStateOf(false) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
+    var showPlaylists by rememberSaveable { mutableStateOf(false) }
+    var openPlaylistId by rememberSaveable { mutableStateOf<Long?>(null) }
+    // The song whose actions sheet (play next, add to queue / a playlist) is open.
+    var menuTrack by remember { mutableStateOf<Track?>(null) }
     var homeSource by rememberSaveable { mutableStateOf<String?>(null) }
     var homePath by rememberSaveable { mutableStateOf("") }
     // Which section of Settings is open (null = the list of sections).
@@ -121,6 +129,11 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     val nowPlaying by viewModel.uiState.collectAsState()
     val sleepTimer by viewModel.sleepTimer.collectAsState()
     val outputRoute by viewModel.outputRoute.collectAsState()
+    val playlists by viewModel.playlists.collectAsState()
+    val queue by viewModel.queue.collectAsState()
+    val openPlaylistTracks by remember(openPlaylistId) {
+        viewModel.playlistTracks(openPlaylistId ?: -1L)
+    }.collectAsState(initial = emptyList<PlaylistTrack>())
 
     // ── folder picker + permission plumbing ──
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
@@ -186,10 +199,15 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     }
 
     // One back handler for everything, so the order of precedence is explicit.
-    BackHandler(enabled = showNowPlaying || showSearch || tab != NavTab.HOME || homePath.isNotEmpty()) {
+    BackHandler(
+        enabled = menuTrack != null || showNowPlaying || showSearch || showPlaylists ||
+            tab != NavTab.HOME || homePath.isNotEmpty()
+    ) {
         when {
+            menuTrack != null -> menuTrack = null
             showNowPlaying -> showNowPlaying = false
             showSearch -> showSearch = false
+            showPlaylists -> if (openPlaylistId != null) openPlaylistId = null else showPlaylists = false
             tab == NavTab.SETTINGS && settingsPage != null -> settingsPage = null
             tab != NavTab.HOME -> tab = NavTab.HOME
             homePath.isNotEmpty() -> homePath = homePath.substringBeforeLast('/', "")
@@ -233,6 +251,8 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     onRescanFolder = { viewModel.rescanFolder(it) },
                     onOpenSearch = { showSearch = true },
                     onOpenSettings = { tab = NavTab.SETTINGS },
+                    onOpenPlaylists = { showPlaylists = true },
+                    onTrackMenu = { menuTrack = it },
                     onSortChange = { key, ascending ->
                         viewModel.settings.update { it.copy(sortKey = key, sortAscending = ascending) }
                     },
@@ -266,6 +286,35 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     onRescanFolder = { viewModel.rescanFolder(it) },
                 )
             }
+        }
+
+        // ── Playlists: a section over the tabs, under the mini player and the bar ──
+        AnimatedVisibility(
+            visible = showPlaylists,
+            enter = fadeIn(tween(200)),
+            exit = fadeOut(tween(160)),
+        ) {
+            PlaylistsScreen(
+                playlists = playlists,
+                openPlaylistId = openPlaylistId,
+                openTracks = openPlaylistTracks,
+                currentUri = nowPlaying.contentUri,
+                isPlaying = nowPlaying.isPlaying,
+                showBadges = settings.showQualityBadges,
+                showArt = settings.showAlbumArt,
+                bottomInset = bottomInset,
+                onOpenPlaylist = { openPlaylistId = it },
+                onCreate = { name -> viewModel.createPlaylist(name) { id -> openPlaylistId = id } },
+                onRename = { id, name -> viewModel.renamePlaylist(id, name) },
+                onDelete = { id -> viewModel.deletePlaylist(id) },
+                onPlay = { id, shuffle, start -> viewModel.playPlaylist(id, shuffle, start) },
+                onRemoveEntry = { entryId -> viewModel.removeFromPlaylist(entryId) },
+                onTrackMenu = { menuTrack = it },
+                onClose = {
+                    openPlaylistId = null
+                    showPlaylists = false
+                },
+            )
         }
 
         // ── soft fade behind the floating controls, so content slides *under* them ──
@@ -312,6 +361,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                 onSelect = { selected ->
                     // Tapping Settings again steps back out to the list of sections.
                     if (selected == tab && selected == NavTab.SETTINGS) settingsPage = null
+                    showPlaylists = false
                     tab = selected
                 },
             )
@@ -334,6 +384,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     showSearch = false
                 },
                 onClose = { showSearch = false },
+                onTrackMenu = { menuTrack = it },
             )
         }
 
@@ -359,10 +410,27 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                 onClose = { showNowPlaying = false },
                 onOpenTools = {
                     showNowPlaying = false
+                    showPlaylists = false
                     tab = NavTab.TOOLS
                 },
+                queue = queue,
+                onQueueJump = { index -> viewModel.playQueueIndex(index) },
+                onQueueRemove = { index -> viewModel.removeFromQueue(index) },
+                onQueueClear = { viewModel.clearUpcoming() },
+                onTrackMenu = { menuTrack = it },
             )
         }
+
+        // ── what can be done with one song (press and hold) — on top of everything ──
+        TrackActionsSheet(
+            track = menuTrack,
+            playlists = playlists,
+            onDismiss = { menuTrack = null },
+            onPlayNext = { track -> viewModel.playNext(track) },
+            onAddToQueue = { track -> viewModel.addToQueue(track) },
+            onAddToPlaylist = { id, track -> viewModel.addToPlaylist(id, listOf(track)) },
+            onCreatePlaylist = { name, track -> viewModel.createPlaylist(name, listOf(track)) },
+        )
     }
 }
 

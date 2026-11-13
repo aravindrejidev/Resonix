@@ -104,6 +104,11 @@ class PlaybackQueueManager(
     private val _nowPlaying = MutableStateFlow<NowPlaying?>(null)
     val nowPlaying: StateFlow<NowPlaying?> = _nowPlaying.asStateFlow()
 
+    private val _queueState = MutableStateFlow(QueueSnapshot())
+
+    /** The queue and the position in it, for the Queue screen. */
+    val queueState: StateFlow<QueueSnapshot> = _queueState.asStateFlow()
+
     private val _isLoading = MutableStateFlow(false)
 
     /** True from the moment a track is requested until it is actually playing (or failed). */
@@ -135,17 +140,102 @@ class PlaybackQueueManager(
             AppMessages.post("There are no songs in this folder")
             return
         }
+        startQueue(tracks, shuffle, startContentUri?.let { uri -> tracks.indexOfFirst { it.contentUri == uri } } ?: -1)
+    }
+
+    /**
+     * Plays exactly these songs as the queue — a playlist, say. [startIndex] is the song to begin with
+     * (-1 = the first); when shuffling, that song simply leads the queue.
+     */
+    fun playTracks(tracks: List<Track>, shuffle: Boolean = false, startIndex: Int = -1) {
+        if (tracks.isEmpty()) {
+            AppMessages.post("There are no songs to play")
+            return
+        }
+        startQueue(tracks, shuffle, startIndex)
+    }
+
+    private fun startQueue(tracks: List<Track>, shuffle: Boolean, startIndex: Int) {
         originalOrder = tracks
         shuffled = shuffle
-        val start = startContentUri?.let { uri -> tracks.firstOrNull { it.contentUri == uri } }
+        val start = startIndex.takeIf { it in tracks.indices }
         queue = when {
             !shuffle -> tracks
-            start != null -> listOf(start) + (tracks - start).shuffled()
+            start != null -> listOf(tracks[start]) + tracks.filterIndexed { i, _ -> i != start }.shuffled()
             else -> tracks.shuffled()
         }
-        currentIndex = if (shuffle || start == null) 0 else tracks.indexOf(start)
+        currentIndex = if (shuffle || start == null) 0 else start
         consecutiveFailures = 0
         playCurrent()
+    }
+
+    // --- Editing the queue ----------------------------------------------------------------
+
+    /** Jumps to the song at [index] of the queue. */
+    fun playAt(index: Int) {
+        if (index !in queue.indices) return
+        currentIndex = index
+        consecutiveFailures = 0
+        playCurrent()
+    }
+
+    /** Puts [track] right after the song that is playing. With nothing playing it just starts. */
+    fun enqueueNext(track: Track) = insertIntoQueue(track, currentIndex + 1)
+
+    /** Puts [track] at the very end of the queue. With nothing playing it just starts. */
+    fun enqueue(track: Track) = insertIntoQueue(track, queue.size)
+
+    private fun insertIntoQueue(track: Track, at: Int) {
+        if (queue.isEmpty() || currentIndex !in queue.indices) {
+            playTracks(listOf(track))
+            return
+        }
+        val position = at.coerceIn(0, queue.size)
+        val current = queue[currentIndex]
+        queue = queue.toMutableList().also { it.add(position, track) }
+        val anchor = originalOrder.indexOfFirst { it === current }
+        originalOrder = originalOrder.toMutableList().also {
+            it.add(if (position <= currentIndex + 1 && anchor >= 0) anchor + 1 else it.size, track)
+        }
+        if (queueFinished) {
+            // The queue had played out and the engine is stopped: what was just added is what to play.
+            currentIndex = position
+            playCurrent()
+            return
+        }
+        publishQueue()
+        if (position == currentIndex + 1) {
+            publishNeighbours()
+            schedulePrepareNext()  // the song that follows has changed
+        }
+    }
+
+    /** Takes the song at [index] out of the queue. The one that is playing stays. */
+    fun removeFromQueue(index: Int) {
+        if (index !in queue.indices || index == currentIndex) return
+        val removed = queue[index]
+        val nextChanged = index == currentIndex + 1
+        queue = queue.toMutableList().also { it.removeAt(index) }
+        if (index < currentIndex) currentIndex--
+        val inOriginal = originalOrder.indexOfFirst { it === removed }
+        if (inOriginal >= 0) originalOrder = originalOrder.toMutableList().also { it.removeAt(inOriginal) }
+        publishQueue()
+        publishNeighbours()
+        if (nextChanged) schedulePrepareNext()
+    }
+
+    /** Drops everything after the song that is playing. */
+    fun clearUpcoming() {
+        if (currentIndex !in queue.indices || currentIndex + 1 >= queue.size) return
+        queue = queue.subList(0, currentIndex + 1).toList()
+        originalOrder = queue
+        publishQueue()
+        publishNeighbours()
+        schedulePrepareNext()  // nothing follows any more: let go of the prepared song
+    }
+
+    private fun publishQueue() {
+        _queueState.value = QueueSnapshot(queue, currentIndex)
     }
 
     /** Re-shuffles (or un-shuffles) the remaining queue in place, keeping
@@ -156,6 +246,7 @@ class PlaybackQueueManager(
         queue = if (enabled) originalOrder.shuffled() else originalOrder
         shuffled = enabled
         currentIndex = current?.let { queue.indexOf(it) }?.takeIf { it >= 0 } ?: 0
+        publishQueue()
         publishNeighbours()
         schedulePrepareNext()  // the song that follows has changed
     }
@@ -245,6 +336,7 @@ class PlaybackQueueManager(
     private fun playCurrent(resumeAt: Long = -1L) {
         val index = currentIndex
         val track = queue.getOrNull(index) ?: return
+        publishQueue()
         resumeAtMs = resumeAt  // set before the load starts (the loader thread reads it); a later request overrides it
         val token = ++loadToken
         queueFinished = false
@@ -306,10 +398,12 @@ class PlaybackQueueManager(
                     pauseWhenLoaded = false
                     engine.pauseTrack()
                 }
+                // The queue may have been edited while this song was loading, so go by where it is now.
+                val at = if (queue.getOrNull(currentIndex)?.contentUri == track.contentUri) currentIndex else index
                 _nowPlaying.value = NowPlaying(
                     track = track,
-                    previous = queue.getOrNull(index - 1),
-                    next = queue.getOrNull(index + 1),
+                    previous = queue.getOrNull(at - 1),
+                    next = queue.getOrNull(at + 1),
                     info = outcome.info,
                 )
                 schedulePrepareNext()
@@ -351,11 +445,14 @@ class PlaybackQueueManager(
         val track = preparedNext
         preparedNext = null
         if (released || _isLoading.value || track == null) return  // a load in flight decides what plays
-        val index = queue.indexOfFirst { it.contentUri == track.contentUri }
+        // The prepared song is the one right after the current position (it can appear twice in a queue).
+        val index = (currentIndex + 1 until queue.size).firstOrNull { queue[it].contentUri == track.contentUri }
+            ?: queue.indexOfFirst { it.contentUri == track.contentUri }
         if (index < 0) return
         currentIndex = index
         consecutiveFailures = 0
         queueFinished = false
+        publishQueue()
         _nowPlaying.value = NowPlaying(
             track = queue[index],
             previous = queue.getOrNull(index - 1),
@@ -394,7 +491,12 @@ class PlaybackQueueManager(
 
     private fun publishNeighbours() {
         val playing = _nowPlaying.value ?: return
-        val index = queue.indexOf(playing.track)
+        // While another song is loading, currentIndex already points at it: find the one on screen.
+        val index = if (queue.getOrNull(currentIndex)?.contentUri == playing.track.contentUri) {
+            currentIndex
+        } else {
+            queue.indexOfFirst { it.contentUri == playing.track.contentUri }
+        }
         if (index < 0) return
         _nowPlaying.value = playing.copy(
             previous = queue.getOrNull(index - 1),

@@ -1,5 +1,6 @@
 package com.resonix.player.playback
 
+import com.resonix.player.data.Track
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +16,12 @@ data class PlaybackSnapshot(
     val outputInfo: String = "",
 )
 
+/** The queue as the Queue screen shows it: the songs in play order, and which of them is the current one. */
+data class QueueSnapshot(
+    val tracks: List<Track> = emptyList(),
+    val currentIndex: Int = -1,
+)
+
 /**
  * Hand-off from PlaybackService to the UI. The service runs in the app's own process, so the
  * screens read what is playing straight from here. (Commands travel the other way through
@@ -26,6 +33,15 @@ object PlaybackStateBus {
 
     fun publish(snapshot: PlaybackSnapshot) {
         _snapshot.value = snapshot
+    }
+
+    private val _queue = MutableStateFlow(QueueSnapshot())
+
+    /** Changes only when the queue itself does (a song added or removed, another one playing) — not with every tick. */
+    val queue: StateFlow<QueueSnapshot> = _queue.asStateFlow()
+
+    fun publishQueue(queue: QueueSnapshot) {
+        _queue.value = queue
     }
 }
 

@@ -15,11 +15,16 @@ import androidx.room.RoomDatabase
  * 3. Build once, then commit the new `app/schemas/com.resonix.player.data.AppDatabase/<version>.json`
  *    that Room exports. Those files are what migrations are written (and tested) against.
  */
-@Database(entities = [Track::class, ScannedFolder::class], version = 3, exportSchema = true)
+@Database(
+    entities = [Track::class, ScannedFolder::class, Playlist::class, PlaylistEntry::class],
+    version = 4,
+    exportSchema = true,
+)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun trackDao(): TrackDao
     abstract fun scannedFolderDao(): ScannedFolderDao
+    abstract fun playlistDao(): PlaylistDao
 
     companion object {
         @Volatile

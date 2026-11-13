@@ -13,6 +13,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.resonix.player.data.AppDatabase
 import com.resonix.player.data.FolderScanner
+import com.resonix.player.data.PlaylistSummary
+import com.resonix.player.data.PlaylistTrack
 import com.resonix.player.data.MediaStoreScanner
 import com.resonix.player.data.ScannedFolder
 import com.resonix.player.data.Track
@@ -22,10 +24,12 @@ import com.resonix.player.playback.OutputRoute
 import com.resonix.player.playback.PlaybackController
 import com.resonix.player.playback.PlaybackSnapshot
 import com.resonix.player.playback.PlaybackStateBus
+import com.resonix.player.playback.QueueSnapshot
 import com.resonix.player.playback.SleepTimerBus
 import com.resonix.player.playback.SleepTimerState
 import com.resonix.player.util.AppMessages
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -82,6 +86,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** The sleep timer runs inside the service, so it survives the screens going away. */
     val sleepTimer: StateFlow<SleepTimerState?> = SleepTimerBus.state
 
+    /** What is queued, in play order, and which song is playing — for the Queue screen. */
+    val queue: StateFlow<QueueSnapshot> = PlaybackStateBus.queue
+
+    private val _playlists = MutableStateFlow<List<PlaylistSummary>>(emptyList())
+
+    /** Every playlist, by name, with how many songs it holds. */
+    val playlists: StateFlow<List<PlaylistSummary>> = _playlists.asStateFlow()
+
     private val _uiState = MutableStateFlow(NowPlayingUiState())
     val uiState: StateFlow<NowPlayingUiState> = _uiState.asStateFlow()
 
@@ -111,6 +123,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             AppDatabase.getInstance(context).scannedFolderDao().getAllFolders().collect {
                 _scannedFolders.value = it
+            }
+        }
+        viewModelScope.launch {
+            AppDatabase.getInstance(context).playlistDao().observePlaylists().collect {
+                _playlists.value = it
             }
         }
 
@@ -188,6 +205,139 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             sortKey = sort.sortKey.name,
             sortAscending = sort.sortAscending,
         )
+    }
+
+    // --- Queue ------------------------------------------------------------------------------
+
+    fun playQueueIndex(index: Int) = PlaybackController.playQueueIndex(index)
+
+    fun removeFromQueue(index: Int) = PlaybackController.removeFromQueue(index)
+
+    fun clearUpcoming() = PlaybackController.clearUpcoming()
+
+    fun playNext(track: Track) {
+        PlaybackController.enqueueNext(getApplication(), track)
+        AppMessages.post("“${track.title}” plays next")
+    }
+
+    fun addToQueue(track: Track) {
+        PlaybackController.enqueue(getApplication(), track)
+        AppMessages.post("Added “${track.title}” to the queue")
+    }
+
+    // --- Playlists --------------------------------------------------------------------------
+
+    private val playlistDao get() = AppDatabase.getInstance(getApplication()).playlistDao()
+
+    /** The songs of one playlist, in order, as long as the screen collects it. */
+    fun playlistTracks(playlistId: Long): Flow<List<PlaylistTrack>> = playlistDao.observeTracks(playlistId)
+
+    /**
+     * Makes a playlist called [name] (an existing one of that name is reused, whatever its case) and
+     * puts [tracks] at its end. Returns through [onDone] with the playlist's id.
+     */
+    fun createPlaylist(name: String, tracks: List<Track> = emptyList(), onDone: (Long) -> Unit = {}) {
+        val clean = name.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                val existing = playlistDao.findIdByName(clean)
+                val id = if (existing != null) {
+                    playlistDao.appendTracks(existing, tracks.map { it.contentUri })
+                    existing
+                } else {
+                    playlistDao.createWithTracks(clean, System.currentTimeMillis() / 1000L, tracks.map { it.contentUri })
+                }
+                if (tracks.isNotEmpty()) AppMessages.post(addedMessage(tracks, clean))
+                onDone(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Creating playlist failed", e)
+                AppMessages.post("Couldn't create the playlist")
+            }
+        }
+    }
+
+    fun addToPlaylist(playlistId: Long, tracks: List<Track>) {
+        if (tracks.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                playlistDao.appendTracks(playlistId, tracks.map { it.contentUri })
+                AppMessages.post(addedMessage(tracks, playlistDao.getName(playlistId) ?: "the playlist"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Adding to playlist failed", e)
+                AppMessages.post("Couldn't add to the playlist")
+            }
+        }
+    }
+
+    private fun addedMessage(tracks: List<Track>, playlistName: String): String =
+        if (tracks.size == 1) "Added “${tracks[0].title}” to “$playlistName”" else "Added ${tracks.size} songs to “$playlistName”"
+
+    fun removeFromPlaylist(entryId: Long) {
+        viewModelScope.launch {
+            try {
+                playlistDao.deleteEntry(entryId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Removing from playlist failed", e)
+            }
+        }
+    }
+
+    fun renamePlaylist(playlistId: Long, name: String) {
+        val clean = name.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                val other = playlistDao.findIdByName(clean)
+                if (other != null && other != playlistId) {
+                    AppMessages.post("There is already a playlist called “$clean”")
+                } else {
+                    playlistDao.rename(playlistId, clean)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Renaming playlist failed", e)
+            }
+        }
+    }
+
+    fun deletePlaylist(playlistId: Long) {
+        viewModelScope.launch {
+            try {
+                playlistDao.deletePlaylist(playlistId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Deleting playlist failed", e)
+                AppMessages.post("Couldn't delete the playlist")
+            }
+        }
+    }
+
+    /** Plays a playlist from [startIndex] (-1 = the first song), in order or shuffled. */
+    fun playPlaylist(playlistId: Long, shuffle: Boolean, startIndex: Int = -1) {
+        viewModelScope.launch {
+            try {
+                val tracks = playlistDao.getTracks(playlistId)
+                if (tracks.isEmpty()) {
+                    AppMessages.post("This playlist has no songs yet")
+                } else {
+                    PlaybackController.playTracks(getApplication(), tracks, shuffle, startIndex)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Playing playlist failed", e)
+                AppMessages.post("Couldn't start playback")
+            }
+        }
     }
 
     fun scanLibrary() {

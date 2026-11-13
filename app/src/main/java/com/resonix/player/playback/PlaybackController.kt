@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.resonix.player.data.Track
 import com.resonix.player.util.AppMessages
 
 private const val TAG = "PlaybackController"
@@ -80,6 +81,26 @@ object PlaybackController {
     ) = run(context) {
         it.playFolder(rootFolderUri, folderPath, shuffle, startContentUri, sortKey, sortAscending)
     }
+
+    /** Plays exactly [tracks] as the queue (a playlist), from [startIndex] (-1 = the first). */
+    fun playTracks(
+        context: Context,
+        tracks: List<Track>,
+        shuffle: Boolean,
+        startIndex: Int = -1,
+    ) = run(context) { it.playTracks(tracks, shuffle, startIndex) }
+
+    fun playQueueIndex(index: Int) = runIfActive { it.playQueueIndex(index) }
+
+    fun removeFromQueue(index: Int) = runIfActive { it.removeFromQueue(index) }
+
+    fun clearUpcoming() = runIfActive { it.clearUpcoming() }
+
+    /** "Play next". Starts playback if nothing is playing. */
+    fun enqueueNext(context: Context, track: Track) = run(context) { it.enqueueNext(track) }
+
+    /** "Add to queue". Starts playback if nothing is playing. */
+    fun enqueue(context: Context, track: Track) = run(context) { it.enqueue(track) }
 
     fun togglePlayPause() = runIfActive { it.togglePlayPause() }
 

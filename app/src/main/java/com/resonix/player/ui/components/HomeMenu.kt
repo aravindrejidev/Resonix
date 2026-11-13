@@ -70,6 +70,7 @@ fun HomeMenu(
     onToggleBadges: () -> Unit,
     onToggleArt: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenPlaylists: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     AnimatedVisibility(
@@ -116,6 +117,8 @@ fun HomeMenu(
                             onClick = {},
                         ),
                 ) {
+                    MenuItem(NeoIcons.Playlists, "Playlists", onClick = { onDismiss(); onOpenPlaylists() })
+                    NeoDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                     MenuItem(NeoIcons.FolderAdd, "Add music folder", onClick = { onDismiss(); onAddFolder() })
                     MenuItem(NeoIcons.Phone, "Scan device library", onClick = { onDismiss(); onScanDevice() })
                     MenuItem(

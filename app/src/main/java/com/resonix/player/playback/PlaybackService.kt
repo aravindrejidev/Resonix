@@ -180,6 +180,7 @@ class PlaybackService : Service() {
         serviceScope.launch { routeMonitor.route.collect { onRouteChanged(it) } }
         serviceScope.launch { queueManager.nowPlaying.collect { onTrackChanged(it) } }
         serviceScope.launch { queueManager.isLoading.collect { refreshAll() } }
+        serviceScope.launch { queueManager.queueState.collect { PlaybackStateBus.publishQueue(it) } }
         serviceScope.launch { runTicker() }
 
         // Last: queued commands (e.g. the "play this folder" that started us) run now.
@@ -259,6 +260,36 @@ class PlaybackService : Service() {
                 AppMessages.post("Couldn't start playback")
             }
         }
+    }
+
+    /** Plays exactly these songs as the queue (a playlist). */
+    fun playTracks(tracks: List<Track>, shuffle: Boolean, startIndex: Int) {
+        queueManager.playTracks(tracks, shuffle, startIndex)
+    }
+
+    fun playQueueIndex(index: Int) {
+        queueManager.playAt(index)
+        refreshAll()
+    }
+
+    fun removeFromQueue(index: Int) {
+        queueManager.removeFromQueue(index)
+        refreshAll()  // whether there is a "next" may have changed
+    }
+
+    fun clearUpcoming() {
+        queueManager.clearUpcoming()
+        refreshAll()
+    }
+
+    fun enqueueNext(track: Track) {
+        queueManager.enqueueNext(track)
+        refreshAll()
+    }
+
+    fun enqueue(track: Track) {
+        queueManager.enqueue(track)
+        refreshAll()
     }
 
     fun togglePlayPause() {

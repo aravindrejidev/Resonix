@@ -41,8 +41,8 @@ import com.resonix.player.ui.theme.LocalNeoColors
 import com.resonix.player.ui.theme.NeoType
 
 /**
- * The three-dot menu of the Now Playing screen: full-frame artwork on / off, keep-screen-on, and a
- * shortcut to the sound tools. Same look and behaviour as the Home menu — an overlay inside the
+ * The three-dot menu of the Now Playing screen: the queue, full-frame artwork on / off,
+ * keep-screen-on, and a shortcut to the sound tools. Same look and behaviour as the Home menu — an overlay inside the
  * screen (not a separate window), closed by tapping anywhere outside the panel.
  */
 @Composable
@@ -54,6 +54,7 @@ fun PlayerMenu(
     onToggleFullFrameArt: () -> Unit,
     onToggleKeepScreenOn: () -> Unit,
     onOpenTools: () -> Unit,
+    onOpenQueue: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     AnimatedVisibility(
@@ -98,6 +99,15 @@ fun PlayerMenu(
                             onClick = {},
                         ),
                 ) {
+                    MenuAction(
+                        icon = NeoIcons.Queue,
+                        label = "Queue",
+                        onClick = {
+                            onDismiss()
+                            onOpenQueue()
+                        },
+                    )
+                    NeoDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                     MenuToggle(
                         icon = NeoIcons.Image,
                         label = "Full-frame artwork",

@@ -49,6 +49,8 @@ fun SearchScreen(
     onTrackClick: (Track) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Press and hold on a song: its actions (play next, add to queue / playlist). */
+    onTrackMenu: (Track) -> Unit = {},
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     val results = remember(query, tracks) {
@@ -115,6 +117,7 @@ fun SearchScreen(
                         showBadge = showBadges,
                         showArt = showArt,
                         onClick = { onTrackClick(track) },
+                        onLongClick = { onTrackMenu(track) },
                     )
                 }
             }

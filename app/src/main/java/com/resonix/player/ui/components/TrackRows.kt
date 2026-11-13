@@ -1,8 +1,10 @@
 package com.resonix.player.ui.components
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -41,8 +43,10 @@ import com.resonix.player.ui.theme.NeoType
 
 /**
  * One song in a list. Rows are flat — no card per song, so a long list stays calm. The song that
- * is loaded gets a faint accent tint, an accent title and bouncing bars.
+ * is loaded gets a faint accent tint, an accent title and bouncing bars. Pressing and holding it
+ * ([onLongClick]) opens the song's actions: play next, add to the queue, add to a playlist.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TrackRow(
     track: Track,
@@ -52,6 +56,7 @@ fun TrackRow(
     showArt: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val neo = LocalNeoColors.current
     val source = remember { MutableInteractionSource() }
@@ -78,10 +83,21 @@ fun TrackRow(
         modifier = modifier
             .fillMaxWidth()
             .background(rowColor, RoundedCornerShape(18.dp))
-            .clickable(interactionSource = source, indication = null, role = Role.Button) {
-                haptic()
-                onClick()
-            }
+            .combinedClickable(
+                interactionSource = source,
+                indication = null,
+                role = Role.Button,
+                onLongClick = onLongClick?.let { action ->
+                    {
+                        haptic()
+                        action()
+                    }
+                },
+                onClick = {
+                    haptic()
+                    onClick()
+                },
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

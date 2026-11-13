@@ -142,3 +142,26 @@ Native: `RingBuffer.h`, `AudioEngine.h/.cpp`, `native-lib.cpp`. Kotlin: `NativeA
 * **Queue view and playlists** (needs interface design and a database migration 3 → 4; the migration path from Round 5 is ready for it).
 * The direct USB (UAC2, libusb) output path that bypasses AudioFlinger entirely.
 
+---
+
+# Round 7 – queue view and playlists
+
+## Added
+* **Queue view.** Now Playing → three-dot menu → *Queue*. Songs in play order, current one highlighted, played ones dimmed; tap = jump, cross = remove, bin = clear what follows. The queue is published to the UI as a `QueueSnapshot` on `PlaybackStateBus.queue`, which changes only when the queue does (not on every tick).
+* **Queue editing in `PlaybackQueueManager`**: `playAt`, `enqueueNext` ("Play next"), `enqueue` ("Add to queue"), `removeFromQueue`, `clearUpcoming`, `playTracks` (play a list as the queue). Adding while the queue had played out starts the new song. Index bookkeeping no longer assumes a song appears once (a queue may hold a song twice); the gapless hand-over picks the occurrence right after the current position. Every change re-prepares the gapless follower.
+* **Song actions sheet** (`TrackActionsSheet`): press and hold a song in Home, Search, a playlist or the queue. `TrackRow` got an optional `onLongClick`.
+* **Playlists** (`PlaylistsScreen`, opened from the playlist button on Home or the Home menu; it sits over the tabs and under the mini player / navigation bar).
+  * Data: `playlists` and `playlist_tracks` tables (`Playlist`, `PlaylistEntry`, `PlaylistDao`), **database version 4** with `MIGRATION_3_4` (two `CREATE TABLE` statements exactly as Room generates them; nothing existing is touched). Entries refer to songs by `trackUri` without a foreign key, so a rescan that rewrites track rows never empties a playlist.
+  * Create / rename (duplicate names refused) / delete, add one or many songs, remove a single occurrence, Play / Shuffle from any song.
+  * Shared `NeoDialog`, `NameDialog`, `ConfirmDialog`, `NeoTextField` components.
+* Back handling: sheet first, then Now Playing (its queue first), Search, Playlists (playlist → list → closed), tabs.
+
+## Checked
+* The playlist SQL (migration DDL and every DAO query) was run in real SQLite; the resulting `PRAGMA table_info` matches what Room expects.
+* `PlaybackQueueManager`, `PlaybackStateBus`, `Playlist.kt`, `PlaylistDao.kt` compile with Kotlin 2.4.20 against stubs for Room and coroutines.
+* **Not compiled / not run**: all Compose UI (`PlaylistsScreen`, `QueueScreen`, `TrackActionsSheet`, `NeoDialogs`, the edits to Home / Search / Now Playing / MainActivity), `PlayerViewModel`, `PlaybackService` and the Room-generated code. No Android SDK or Compose libraries were available. Names of the new icons (`AutoMirrored.Rounded.QueueMusic` / `PlaylistAdd` / `PlaylistPlay`) are from memory.
+
+## Not done
+* Reordering songs (drag) in a playlist or the queue.
+* Backing up playlists.
+

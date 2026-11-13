@@ -2,7 +2,11 @@ package com.resonix.player.ui.neo
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.automirrored.rounded.Sort
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
@@ -11,6 +15,8 @@ import androidx.compose.material.icons.rounded.FlashOn
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Brightness4
@@ -97,4 +103,10 @@ object NeoIcons {
     val Lock: ImageVector get() = Icons.Rounded.Lock
     val Shield: ImageVector get() = Icons.Rounded.Security
     val Speed: ImageVector get() = Icons.Rounded.Speed
+    val Add: ImageVector get() = Icons.Rounded.Add
+    val Delete: ImageVector get() = Icons.Rounded.Delete
+    val Edit: ImageVector get() = Icons.Rounded.Edit
+    val Queue: ImageVector get() = Icons.AutoMirrored.Rounded.QueueMusic
+    val Playlists: ImageVector get() = Icons.AutoMirrored.Rounded.PlaylistPlay
+    val AddToPlaylist: ImageVector get() = Icons.AutoMirrored.Rounded.PlaylistAdd
 }

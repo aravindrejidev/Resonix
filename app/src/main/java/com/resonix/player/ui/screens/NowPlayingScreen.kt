@@ -5,12 +5,17 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.view.View
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -77,6 +82,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import com.resonix.player.audio.isLosslessFormat
+import com.resonix.player.data.Track
+import com.resonix.player.playback.QueueSnapshot
 import com.resonix.player.ui.ArtPalette
 import com.resonix.player.ui.NowPlayingUiState
 import com.resonix.player.ui.components.PlayerMenu
@@ -135,6 +142,13 @@ fun NowPlayingScreen(
     onSeek: (Long) -> Unit,
     onClose: () -> Unit,
     onOpenTools: () -> Unit,
+    /** The queue behind the three-dot menu's "Queue": songs in play order and the one playing. */
+    queue: QueueSnapshot,
+    onQueueJump: (index: Int) -> Unit,
+    onQueueRemove: (index: Int) -> Unit,
+    onQueueClear: () -> Unit,
+    /** Press and hold on a queued song: its actions (play next, playlists …). */
+    onTrackMenu: (Track) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val neo = LocalNeoColors.current
@@ -165,6 +179,8 @@ fun NowPlayingScreen(
 
     var menuOpen by remember { mutableStateOf(false) }
     BackHandler(enabled = menuOpen) { menuOpen = false }
+    var queueOpen by remember { mutableStateOf(false) }
+    BackHandler(enabled = queueOpen) { queueOpen = false }
 
     // While the thumb is being dragged (and for a moment after release, until the player
     // reports the new position) show the dragged value instead of the polled one.
@@ -231,7 +247,24 @@ fun NowPlayingScreen(
             onToggleFullFrameArt = onToggleFullFrameArt,
             onToggleKeepScreenOn = onToggleKeepScreenOn,
             onOpenTools = onOpenTools,
+            onOpenQueue = { queueOpen = true },
         )
+
+        AnimatedVisibility(
+            visible = queueOpen,
+            enter = slideInVertically(tween(260)) { it / 8 } + fadeIn(tween(200)),
+            exit = slideOutVertically(tween(200)) { it / 8 } + fadeOut(tween(160)),
+        ) {
+            QueueScreen(
+                queue = queue,
+                isPlaying = state.isPlaying,
+                onJump = onQueueJump,
+                onRemove = onQueueRemove,
+                onClear = onQueueClear,
+                onTrackMenu = onTrackMenu,
+                onClose = { queueOpen = false },
+            )
+        }
     }
 }
 

@@ -131,6 +131,9 @@ fun HomeScreen(
     onSortChange: (SortKey, Boolean) -> Unit,
     onToggleBadges: () -> Unit,
     onToggleArt: () -> Unit,
+    onOpenPlaylists: () -> Unit,
+    /** Press and hold on a song: its actions (play next, add to queue / playlist). */
+    onTrackMenu: (Track) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val neo = LocalNeoColors.current
@@ -183,6 +186,7 @@ fun HomeScreen(
                 subtitle = subtitle,
                 canGoUp = path.isNotEmpty(),
                 onUp = { onPathChange(path.substringBeforeLast('/', "")) },
+                onPlaylists = onOpenPlaylists,
                 onSearch = onOpenSearch,
                 onMore = { menuOpen = !menuOpen },
             )
@@ -255,6 +259,7 @@ fun HomeScreen(
                                     showBadge = settings.showQualityBadges,
                                     showArt = settings.showAlbumArt,
                                     onClick = { onTrackClick(track) },
+                                    onLongClick = { onTrackMenu(track) },
                                 )
                             }
                         }
@@ -299,6 +304,7 @@ fun HomeScreen(
             onToggleBadges = onToggleBadges,
             onToggleArt = onToggleArt,
             onOpenSettings = onOpenSettings,
+            onOpenPlaylists = onOpenPlaylists,
         )
     }
 }
@@ -310,6 +316,7 @@ private fun HomeHeader(
     subtitle: String,
     canGoUp: Boolean,
     onUp: () -> Unit,
+    onPlaylists: () -> Unit,
     onSearch: () -> Unit,
     onMore: () -> Unit,
 ) {
@@ -353,6 +360,8 @@ private fun HomeHeader(
             )
         }
         Spacer(Modifier.width(12.dp))
+        NeoIconButton(icon = NeoIcons.Playlists, onClick = onPlaylists, contentDescription = "Playlists", diameter = 44.dp)
+        Spacer(Modifier.width(8.dp))
         NeoIconButton(icon = NeoIcons.Search, onClick = onSearch, contentDescription = "Search", diameter = 44.dp)
         Spacer(Modifier.width(8.dp))
         NeoIconButton(icon = NeoIcons.More, onClick = onMore, contentDescription = "More options", diameter = 44.dp)

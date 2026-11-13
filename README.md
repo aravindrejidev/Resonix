@@ -124,7 +124,9 @@ No accounts. No ads. No telemetry. The app does not even ask for the Internet pe
 - **Equalizer** — a 10-band **graphic** EQ (31 Hz to 16 kHz, ±12 dB, 9 presets) and a **parametric** EQ with up to 16 bands (Peak, Low / High shelf, Low / High pass, Notch; 20 Hz to 20 kHz, ±24 dB, Q 0.1 to 20) with a live response graph and AutoEQ / Equalizer APO paste and copy. One of the two is active at a time. It runs in 64-bit in front of the rest of the chain, turns itself down for headroom so boosting cannot clip, and is skipped completely when flat.
 
 #### Playback
-- **Folder-based queue** with Play, Shuffle, Next / Previous and automatic advance. Unreadable files are skipped.
+- **Queue** — Play, Shuffle, Next / Previous and automatic advance; unreadable files are skipped. Open **Queue** from the three-dot menu of the Now Playing screen to see everything in play order (the song playing highlighted, played ones dimmed): tap a song to jump to it, the cross takes it out, and the bin clears everything after the current song.
+- **Song actions** — press and hold any song (Home, Search, a playlist, the queue) for **Play next**, **Add to queue** and **Add to playlist** (an existing one, or a new one made on the spot).
+- **Playlists** — the playlist icon on Home (or the menu) opens them. Create, rename and delete playlists, add songs from anywhere, remove single songs, and Play or Shuffle one. A playlist can hold the same song twice, keeps its place when a folder is rescanned (songs are referred to by their file, not by library rows), and a song whose file has gone is simply hidden until it returns. Playlists live in the app's database and are not part of Android's backup, because they point at folders this phone has been given access to.
 - **Media session & notification** — Previous, Play / Pause and Next on the lock screen, in the notification and on headset or Bluetooth buttons.
 - **Audio focus** with ducking, and an automatic pause when headphones are unplugged.
 - **Background playback** — a foreground media service with a wake lock keeps music going with the screen off.
@@ -520,6 +522,7 @@ pie showData title What Resonix is made of (non-blank lines of code)
 - [x] Sleep timer that survives closing the app
 - [x] Full-frame Now Playing with cover-tinted background, themes and accent colours
 - [x] Equalizer engine: 10-band graphic and 16-band parametric, 64-bit biquads with automatic headroom
+- [x] Queue view (jump, remove, clear) and playlists (database version 4, migration 3 → 4)
 - [x] Gapless playback: sample-exact hand-over between songs, ReplayGain switched on the boundary sample
 - [x] The engine checks the real device rate and converts itself instead of letting Android's mixer resample (Android 14+ verified, older versions for the built-in outputs)
 - [x] A release workflow that publishes signed APKs (`.github/workflows/release.yml`)
@@ -528,7 +531,6 @@ pie showData title What Resonix is made of (non-blank lines of code)
 - [x] Settings-only backup rules: the library database and folder grants are not restored onto another phone
 
 **Ideas**
-- [ ] Queue view and playlists
 
 Have an idea? Open an [issue](https://github.com/aravindrejidev/Resonix/issues) and tell us.
 
