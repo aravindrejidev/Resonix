@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and older (android:fullBackupContent).
+
+  Only the appearance / audio-engine / EQ settings are backed up. Everything else is left out on
+  purpose:
+   - resonix.db        the library cache. It points at folders through SAF tree URIs, and those
+                       permission grants do not survive a restore on a new phone.
+   - resonix_library   the last-opened folder (a SAF URI, same reason).
+   - Direct-volume prefs  hold the Android volume to put back once the app stops parking it;
+                       restoring a stale value onto another phone would set a wrong volume.
+  As soon as one <include> exists, everything not listed is excluded.
+-->
+<full-backup-content>
+    <include domain="sharedpref" path="resonix_ui_settings.xml" />
+</full-backup-content>

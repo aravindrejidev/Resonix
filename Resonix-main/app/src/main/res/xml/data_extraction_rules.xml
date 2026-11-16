@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (android:dataExtractionRules). Same policy as backup_rules.xml: only the settings
+  file travels, for both cloud backup and device-to-device transfer. The library database and
+  folder / volume state stay behind, because they depend on this phone's SAF grants and volume.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="sharedpref" path="resonix_ui_settings.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="sharedpref" path="resonix_ui_settings.xml" />
+    </device-transfer>
+</data-extraction-rules>
