@@ -22,6 +22,10 @@ add_library(resonix_audio SHARED
     AudioEngine.cpp
     AudioDecoder.cpp
     TrackProber.cpp
+    UsbAudio.cpp
+    UsbDirect.cpp
+    UsbStreamer.cpp
+    UsbfsTransport.cpp
 )
 
 target_compile_features(resonix_audio PRIVATE cxx_std_17)

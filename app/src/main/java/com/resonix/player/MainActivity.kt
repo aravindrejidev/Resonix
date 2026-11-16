@@ -129,6 +129,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
     val nowPlaying by viewModel.uiState.collectAsState()
     val sleepTimer by viewModel.sleepTimer.collectAsState()
     val outputRoute by viewModel.outputRoute.collectAsState()
+    val usbDirectStatus by viewModel.usbDirect.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
     val queue by viewModel.queue.collectAsState()
     val openPlaylistTracks by remember(openPlaylistId) {
@@ -278,6 +279,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     scrollState = settingsScroll,
                     bottomInset = bottomInset,
                     outputRoute = outputRoute,
+                    usbDirectStatus = usbDirectStatus.message,
                     page = settingsPage,
                     onPageChange = { settingsPage = it },
                     onChange = { transform -> viewModel.settings.update(transform) },

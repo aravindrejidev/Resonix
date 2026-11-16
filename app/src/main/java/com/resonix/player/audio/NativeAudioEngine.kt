@@ -118,6 +118,36 @@ class NativeAudioEngine {
         if (nativeHandle != 0L) nativeSetPlatformMixerRate(nativeHandle, hz, routeKey)
     }
 
+    /**
+     * Gives the engine a USB DAC to drive itself (see UsbDirectManager). [descriptors] are the raw USB
+     * descriptors of the device; [fd] belongs to the UsbDeviceConnection, which has to stay open — the
+     * engine works on a duplicate. Returns a one-line summary of what the DAC can play, or an empty string
+     * if it has no PCM playback stream the engine can use. Does not touch the device yet.
+     */
+    fun usbAttach(fd: Int, descriptors: ByteArray, name: String): String {
+        return if (nativeHandle != 0L) nativeUsbAttach(nativeHandle, fd, descriptors, name) else ""
+    }
+
+    /** Forgets the DAC and gives it back to Android's own driver. */
+    fun usbDetach() {
+        if (nativeHandle != 0L) nativeUsbDetach(nativeHandle)
+    }
+
+    /** Whether songs go straight to the attached DAC (true) or through Android's audio (false). */
+    fun setUsbDirect(enabled: Boolean) {
+        if (nativeHandle != 0L) nativeSetUsbDirect(nativeHandle, enabled)
+    }
+
+    /** True once after the DAC stopped answering (unplugged) while the engine was driving it. */
+    fun consumeUsbLost(): Boolean {
+        return nativeHandle != 0L && nativeConsumeUsbLost(nativeHandle)
+    }
+
+    /** The engine is playing to the DAC directly right now. */
+    fun isUsbStreaming(): Boolean {
+        return nativeHandle != 0L && nativeIsUsbStreaming(nativeHandle)
+    }
+
     fun getAudioTrackInfo(): AudioTrackInfo {
         if (nativeHandle == 0L) {
             return AudioTrackInfo(0, 0, 0, 0L, 0L, "")
@@ -264,6 +294,11 @@ class NativeAudioEngine {
     private external fun nativeCancelNext(handle: Long): Boolean
     private external fun nativeConsumeGaplessAdvance(handle: Long): Boolean
     private external fun nativeIsNextReady(handle: Long): Boolean
+    private external fun nativeUsbAttach(handle: Long, fd: Int, descriptors: ByteArray, name: String): String
+    private external fun nativeUsbDetach(handle: Long)
+    private external fun nativeSetUsbDirect(handle: Long, enabled: Boolean)
+    private external fun nativeConsumeUsbLost(handle: Long): Boolean
+    private external fun nativeIsUsbStreaming(handle: Long): Boolean
     private external fun nativeSetPlatformMixerRate(handle: Long, hz: Int, routeKey: Int)
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetBitDepth(handle: Long): Int

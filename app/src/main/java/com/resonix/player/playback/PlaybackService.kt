@@ -87,6 +87,7 @@ class PlaybackService : Service() {
     private lateinit var routeMonitor: AudioRouteMonitor
     private lateinit var directVolume: DirectVolume
     private var usbBitPerfect: UsbBitPerfect? = null  // Android 14+ only
+    private lateinit var usbDirect: UsbDirectManager   // Direct USB output: a DAC the engine drives itself
 
     /** Direct-volume gain from Settings, and the temporary dip while another app talks. */
     private var dvcGain = 1.0
@@ -95,6 +96,8 @@ class PlaybackService : Service() {
     // Direct volume control state machine (see reconcileDirectVolume).
     @Volatile
     private var bitPerfectActive = false     // the USB bit-perfect mixer is engaged for the current song
+    @Volatile
+    private var usbDirectActive = false      // the engine plays the current song to a USB DAC directly
     private var dvcEngaged = false
     private var systemFolded = false         // Android's volume has been folded into the engine level
     private var foldedForLock = false        // ... because DVC parks the system volume (not just bit-perfect)
@@ -163,6 +166,8 @@ class PlaybackService : Service() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
 
+        usbDirect = UsbDirectManager(this, engine) { onUsbDirectChanged() }
+
         // The very first apply happens right here (no stream exists yet, so it is instant) so the
         // first song already opens with the saved Output / Exclusive / Bit-perfect choices.
         val initialSettings = settings.state.value
@@ -219,6 +224,7 @@ class PlaybackService : Service() {
         }
         audioFocusManager.abandonFocus()
         queueManager.release()  // waits for an in-flight load: the engine must outlive it
+        usbDirect.release()
         channelProber?.release()
         engineSettingsExecutor.shutdown()
         try {
@@ -360,6 +366,7 @@ class PlaybackService : Service() {
     // --- Settings -> engine ---------------------------------------------------------
 
     private fun applySettings(state: SettingsState) {
+        usbDirect.setEnabled(state.usbDirect)
         reconcileDirectVolume()
         try {
             engineSettingsExecutor.execute {
@@ -388,7 +395,7 @@ class PlaybackService : Service() {
     }
 
     private fun planSettingsKey(s: SettingsState): String =
-        "${s.outputFormat}/${s.usbBitPerfect}/${s.bitPerfect}/${s.resamplerQuality}"
+        "${s.outputFormat}/${s.usbBitPerfect}/${s.bitPerfect}/${s.resamplerQuality}/${s.usbDirect}"
 
     private fun routeKey(route: OutputRoute): String = "${route.kind}/${route.deviceId}"
 
@@ -398,8 +405,15 @@ class PlaybackService : Service() {
         queueManager.reloadCurrent(engine.getCurrentPositionMs(), startPaused = !engine.isPlaying())
     }
 
+    /** A USB DAC became usable (or stopped being so): the song that is playing should move to the right output. */
+    private fun onUsbDirectChanged() {
+        if (destroyed) return
+        replanCurrentSong()
+    }
+
     private fun onRouteChanged(route: OutputRoute) {
         if (destroyed) return
+        usbDirect.refresh()
         val key = routeKey(route)
         val previous = lastRouteKey
         lastRouteKey = key
@@ -439,6 +453,29 @@ class PlaybackService : Service() {
         val nativeRate = routeMonitor.nativeSampleRateHz
         val usb = route.kind == RouteKind.USB_DAC
 
+        // Direct USB: Resonix drives the DAC itself, so Android's mixer, its volume and the bit-perfect mixer
+        // play no part. The engine picks the DAC's format and, if the DAC lacks the song's rate, converts to
+        // the nearest one it has. (If it cannot play the song after all, the engine falls back to Android.)
+        if (s.usbDirect && usbDirect.ready) {
+            usbBitPerfect?.release()
+            if (!usbDirectActive || bitPerfectActive) {
+                usbDirectActive = true
+                bitPerfectActive = false
+                runOnMainAndWait(800) { reconcileDirectVolume() }  // Android's volume no longer counts: fold it into the engine
+            }
+            engine.setPlatformMixerRate(0, route.deviceId)
+            engine.setOutputPlan(
+                deviceId = 0,
+                forcedRateHz = 0,
+                formatPref = s.outputFormat.nativeValue,
+                bitPerfectMixer = false,
+                nativeRateHz = nativeRate,
+            )
+            return
+        }
+        val hadUsbDirect = usbDirectActive
+        usbDirectActive = false
+
         var forcedRate = 0
         var formatPref = s.outputFormat.nativeValue
         var bitPerfectMixer = false
@@ -468,7 +505,7 @@ class PlaybackService : Service() {
         }
         if (!bitPerfectMixer) {
             bitPerfect?.release()
-            if (bitPerfectActive) {
+            if (bitPerfectActive || hadUsbDirect) {
                 bitPerfectActive = false
                 runOnMainAndWait(800) { reconcileDirectVolume() }
             }
@@ -516,7 +553,7 @@ class PlaybackService : Service() {
         val s = settings.state.value
         if (!s.gapless) return false
         return when {
-            bitPerfectActive ->
+            bitPerfectActive || usbDirectActive ->  // the stream's format was chosen for the first song
                 current.sampleRateHz > 0 && current.sampleRateHz == next.sampleRateHz &&
                     current.bitDepth > 0 && current.bitDepth == next.bitDepth
             !s.bitPerfect -> true
@@ -560,8 +597,9 @@ class PlaybackService : Service() {
         val s = settings.state.value
         val type = routeMonitor.route.value.deviceType
         val lockWanted = s.directVolume && s.dvcLockSystemVolume
-        val wanted = s.directVolume || bitPerfectActive
-        val foldWanted = lockWanted || bitPerfectActive
+        val volumeInEngine = bitPerfectActive || usbDirectActive  // Android's volume does not reach this output
+        val wanted = s.directVolume || volumeInEngine
+        val foldWanted = lockWanted || volumeInEngine
         var level = s.directVolumeLevel
 
         if (wanted) {
@@ -652,6 +690,10 @@ class PlaybackService : Service() {
         var lastKey = ""
         while (true) {
             queueManager.checkForAutoAdvance()
+            if (engine.consumeUsbLost()) {
+                usbDirectActive = false
+                usbDirect.onLost()  // the DAC went away mid-song: carry on through Android's audio
+            }
 
             // Engine-driven transitions (a song ending on its own, the stream being stopped)
             // don't come with a flow emission, so notice them here.
@@ -721,6 +763,11 @@ class PlaybackService : Service() {
     }
 
     private fun onTrackChanged(playing: NowPlaying?) {
+        if (usbDirectActive && !engine.isUsbStreaming() && !queueManager.isLoading.value) {
+            // The engine could not play this song to the DAC and used Android's audio: so Android's volume counts again.
+            usbDirectActive = false
+            reconcileDirectVolume()
+        }
         if (playing != null) {
             session.isActive = true
             audioFocusManager.requestFocus()

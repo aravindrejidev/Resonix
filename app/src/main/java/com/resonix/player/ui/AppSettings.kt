@@ -107,6 +107,8 @@ data class SettingsState(
     val peakLimiter: Boolean = true,
     /** Carry straight on from one song into the next, without a pause, whenever both play as the same stream. */
     val gapless: Boolean = true,
+    /** Drive a USB DAC directly over USB, bypassing Android's audio stack (experimental). */
+    val usbDirect: Boolean = false,
 
     // Tools — equalizer
     val eqEnabled: Boolean = false,
@@ -193,6 +195,7 @@ class AppSettings private constructor(context: Context) {
             replayGain = parseEnum(prefs.getString(KEY_REPLAY_GAIN, null), d.replayGain),
             peakLimiter = prefs.getBoolean(KEY_LIMITER, d.peakLimiter),
             gapless = prefs.getBoolean(KEY_GAPLESS, d.gapless),
+            usbDirect = prefs.getBoolean(KEY_USB_DIRECT, d.usbDirect),
             outputFormat = parseEnum(prefs.getString(KEY_OUTPUT_FORMAT, null), d.outputFormat),
             dither = parseEnum(prefs.getString(KEY_DITHER, null), d.dither),
             resamplerQuality = parseEnum(prefs.getString(KEY_RESAMPLER, null), d.resamplerQuality),
@@ -233,6 +236,7 @@ class AppSettings private constructor(context: Context) {
             .putString(KEY_REPLAY_GAIN, s.replayGain.name)
             .putBoolean(KEY_LIMITER, s.peakLimiter)
             .putBoolean(KEY_GAPLESS, s.gapless)
+            .putBoolean(KEY_USB_DIRECT, s.usbDirect)
             .putString(KEY_OUTPUT_FORMAT, s.outputFormat.name)
             .putString(KEY_DITHER, s.dither.name)
             .putString(KEY_RESAMPLER, s.resamplerQuality.name)
@@ -283,6 +287,7 @@ class AppSettings private constructor(context: Context) {
         private const val KEY_REPLAY_GAIN = "replay_gain"
         private const val KEY_LIMITER = "peak_limiter"
         private const val KEY_GAPLESS = "gapless"
+        private const val KEY_USB_DIRECT = "usb_direct"
         private const val KEY_EQ_ON = "eq_enabled"
         private const val KEY_EQ_PRESET = "eq_preset"
         private const val KEY_EQ_BANDS = "eq_bands"

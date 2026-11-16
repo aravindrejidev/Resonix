@@ -22,6 +22,14 @@ data class QueueSnapshot(
     val currentIndex: Int = -1,
 )
 
+/** What the Settings screen says about Direct USB output: whether a DAC was found, needs permission, is ready. */
+data class UsbDirectStatus(
+    val state: State = State.OFF,
+    val message: String = "",
+) {
+    enum class State { OFF, NO_DEVICE, NEEDS_PERMISSION, READY, UNSUPPORTED, ERROR }
+}
+
 /**
  * Hand-off from PlaybackService to the UI. The service runs in the app's own process, so the
  * screens read what is playing straight from here. (Commands travel the other way through
@@ -33,6 +41,13 @@ object PlaybackStateBus {
 
     fun publish(snapshot: PlaybackSnapshot) {
         _snapshot.value = snapshot
+    }
+
+    private val _usbDirect = MutableStateFlow(UsbDirectStatus())
+    val usbDirect: StateFlow<UsbDirectStatus> = _usbDirect.asStateFlow()
+
+    fun publishUsbDirect(status: UsbDirectStatus) {
+        _usbDirect.value = status
     }
 
     private val _queue = MutableStateFlow(QueueSnapshot())

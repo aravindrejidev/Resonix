@@ -25,6 +25,7 @@ import com.resonix.player.playback.PlaybackController
 import com.resonix.player.playback.PlaybackSnapshot
 import com.resonix.player.playback.PlaybackStateBus
 import com.resonix.player.playback.QueueSnapshot
+import com.resonix.player.playback.UsbDirectStatus
 import com.resonix.player.playback.SleepTimerBus
 import com.resonix.player.playback.SleepTimerState
 import com.resonix.player.util.AppMessages
@@ -88,6 +89,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     /** What is queued, in play order, and which song is playing — for the Queue screen. */
     val queue: StateFlow<QueueSnapshot> = PlaybackStateBus.queue
+
+    /** Direct USB output: whether a DAC was found, needs permission, or is ready. */
+    val usbDirect: StateFlow<UsbDirectStatus> = PlaybackStateBus.usbDirect
 
     private val _playlists = MutableStateFlow<List<PlaylistSummary>>(emptyList())
 

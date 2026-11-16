@@ -12,6 +12,7 @@
 #include <oboe/Oboe.h>
 
 #include "AudioDecoder.h"
+#include "UsbDirect.h"
 #include "Dsp.h"
 #include "Quantizer.h"
 #include "RingBuffer.h"
@@ -99,6 +100,25 @@ public:
     // True while a next track is opened and waiting (it is not once the hand-over has happened, nor
     // after a seek back into the old track dropped it).
     bool isNextReady() const { return mNextReady.load(std::memory_order_acquire); }
+
+    // --- Direct USB ------------------------------------------------------------------
+    // Resonix can drive a USB DAC itself, speaking USB Audio Class to it over the usbfs file descriptor
+    // Android's UsbManager hands out, and so bypass Android's whole audio stack. [fd] is a dup() of
+    // UsbDeviceConnection.getFileDescriptor() (the engine takes it over); [descriptors] are
+    // getRawDescriptors(). Returns a one-line description of what the DAC can play, or "" when it has no
+    // usable PCM playback stream (nothing is kept then). Attaching does not touch the device.
+    std::string attachUsbDevice(int fd, const uint8_t *descriptors, size_t length, const std::string &name);
+    std::string attachUsbTransport(std::unique_ptr<usb::UsbTransport> transport, const uint8_t *descriptors,
+                                   size_t length, const std::string &name);  // the tests' way in
+    // Forgets the DAC and gives it back to Android's own driver.
+    void detachUsbDevice();
+    // Whether songs go to the attached DAC directly (when there is one) or to Android's audio as usual.
+    // Takes effect with the next song.
+    void setUsbDirect(bool enabled);
+    // True once if the DAC has been unplugged or stopped answering while it was playing; the stream is
+    // then dead and the caller should play again through Android's audio.
+    bool consumeUsbLost();
+    bool isUsbStreaming();
 
     void pauseTrack();
     void resumeTrack();
@@ -230,6 +250,18 @@ private:
     void startDecodeThread();
     void stopDecodeThread();
     void decodeThreadLoop();
+
+    // Direct USB (see attachUsbDevice). The streaming thread calls renderBlock() through the fill function
+    // that openUsbLocked() builds; everything else about it lives in usb::UsbDirect.
+    bool openUsbLocked(const TrackInfo &info);
+    void noteTrackProgress();   // end-of-track bookkeeping for outputs that are not Oboe's callback
+    std::unique_ptr<usb::UsbDirect> mUsb;         // guarded by mStreamLock
+    std::atomic<bool> mUsbDirectWanted{false};
+    std::atomic<bool> mUsbLost{false};
+    std::atomic<bool> mUsbFailedHint{false};      // set by the streaming thread when the DAC dies; cleaned up by consumeUsbLost()
+    std::atomic<bool> mUsbActive{false};          // a stream to the DAC is open (a hint that needs no lock to read)
+    void closeUsbLocked(bool releaseInterfaces);
+    std::vector<uint8_t> mUsbMonoScratch;         // a mono song played through a stereo alt setting
 
     // Gapless internals (see the class comment).
     bool trySwitchToNext();          // decode thread: the playing decoder is done, carry on with the prepared one

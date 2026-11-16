@@ -110,6 +110,8 @@ fun SettingsScreen(
     scrollState: ScrollState,
     bottomInset: Dp,
     outputRoute: OutputRoute,
+    /** What Direct USB output has found (a DAC, a permission to wait for …); empty when it is off. */
+    usbDirectStatus: String = "",
     page: SettingsPage?,
     onPageChange: (SettingsPage?) -> Unit,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
@@ -182,7 +184,7 @@ fun SettingsScreen(
                         onScanDevice = onScanDevice,
                         onRescanFolder = onRescanFolder,
                     )
-                    SettingsPage.AUDIO -> AudioSection(settings, outputRoute, onChange)
+                    SettingsPage.AUDIO -> AudioSection(settings, outputRoute, usbDirectStatus, onChange)
                     SettingsPage.ABOUT -> AboutSection(versionName)
                 }
             }
@@ -457,6 +459,7 @@ private fun LibrarySection(
 private fun AudioSection(
     settings: SettingsState,
     route: OutputRoute,
+    usbDirectStatus: String,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
 ) {
     SettingsGroup("Connected output") {
@@ -498,6 +501,17 @@ private fun AudioSection(
             subtitle = "The system hands the engine's samples to the DAC unchanged — no resampling, no effects. Volume then comes from Direct volume control",
             checked = settings.usbBitPerfect,
             onCheckedChange = { on -> onChange { it.copy(usbBitPerfect = on) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Storage,
+            title = "Direct USB output (experimental)",
+            subtitle = "Resonix talks to the USB DAC itself and bypasses Android's audio stack completely: no mixer, no resampling by Android. " +
+                "Android's volume then has no effect (use Direct volume control), and other apps cannot use the DAC meanwhile. " +
+                "Needs your permission for the DAC; some DACs with a microphone input also need Android's microphone permission." +
+                (if (settings.usbDirect && usbDirectStatus.isNotBlank()) "\n$usbDirectStatus" else ""),
+            checked = settings.usbDirect,
+            onCheckedChange = { on -> onChange { it.copy(usbDirect = on) } },
         )
         SettingsDivider()
         ToggleRow(

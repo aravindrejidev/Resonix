@@ -10,11 +10,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "AudioEngine.h"
+#include "FakeDac.h"
 
 using namespace resonix;
 static std::string mediaDir() {
@@ -335,6 +337,210 @@ static void testPlainTrack() {
     CHECK(!e2.consumeGaplessAdvance(), "no stale hand-over");
 }
 
+
+// ------------------------------------------------------------------------------------------------
+// Direct USB: the same engine, but the DAC is a simulated USB device and Oboe is not involved.
+
+static const std::vector<fake::Uac2Alt> kUsbAlts = {{1, 2, 16}, {2, 3, 24}, {3, 4, 32}};
+
+static fake::FakeDac *attachFakeDac(AudioEngine &e, const std::vector<int> &rates, std::vector<fake::Uac2Alt> alts = kUsbAlts, int channels = 2) {
+    auto dac = std::make_unique<fake::FakeDac>();
+    dac->speedup = 3;   // slowly enough that an instrumented (sanitizer) build still keeps the DAC fed
+    dac->clockRates = rates;
+    fake::FakeDac *raw = dac.get();
+    const fake::Bytes d = fake::uac2Descriptors(alts, channels);
+    const std::string summary = e.attachUsbTransport(std::move(dac), d.data(), d.size(), "Test DAC");
+    CHECK(!summary.empty(), "attached: %s", summary.c_str());
+    e.setUsbDirect(true);
+    return raw;
+}
+
+static bool waitUntil(const std::function<bool()> &cond, int ms) {
+    for (int i = 0; i < ms / 5; i++) { if (cond()) return true; sleepMs(5); }
+    return cond();
+}
+
+// What the quantiser makes of the float reference: [bytes] per sample, little endian.
+static std::vector<uint8_t> toPcm(const std::vector<float> &ref, int bytes) {
+    std::vector<uint8_t> out;
+    out.reserve(ref.size() * bytes);
+    const double scale = (bytes == 2) ? 32768.0 : (bytes == 3 ? 8388608.0 : 2147483648.0);
+    for (float f : ref) {
+        long long v = std::llround((double)f * scale);
+        const long long hi = (long long)scale - 1;
+        if (v > hi) v = hi;
+        for (int b = 0; b < bytes; b++) out.push_back((uint8_t)((v >> (8 * b)) & 0xFF));
+    }
+    return out;
+}
+
+// The received stream is silence, then the song, then silence. Find the song and compare it with [expect].
+static bool matchesSong(const std::vector<uint8_t> &got, const std::vector<uint8_t> &expect, size_t *firstDiff = nullptr) {
+    size_t g0 = 0, e0 = 0;
+    while (g0 < got.size() && got[g0] == 0) g0++;
+    while (e0 < expect.size() && expect[e0] == 0) e0++;
+    // a song that starts with zeros: align on the first non-zero byte of each
+    if (g0 < e0) return false;
+    const size_t start = g0 - e0;
+    if (start + expect.size() > got.size()) return false;
+    for (size_t i = 0; i < expect.size(); i++) {
+        if (got[start + i] != expect[i]) { if (firstDiff) *firstDiff = i; return false; }
+    }
+    for (size_t i = start + expect.size(); i < got.size(); i++) if (got[i] != 0) { if (firstDiff) *firstDiff = i; return false; }
+    return true;
+}
+
+static void testUsbBasic() {
+    std::printf("[direct USB: a song reaches the DAC bit for bit]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachFakeDac(e, {44100, 48000, 96000});
+    int f = openFile("a_44k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+    CHECK(oboe::platform().openedRates.empty(), "Android's audio stream was never opened");
+    CHECK(e.isUsbStreaming(), "streaming over USB");
+    CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 8000), "the song ends");
+    sleepMs(100);
+    std::lock_guard<std::mutex> l(dac->mu);
+    CHECK(dac->uac2Rate == 44100, "DAC clock at 44.1 kHz (%d)", dac->uac2Rate);
+    CHECK(dac->altOf[1] == 1, "16-bit alt setting");
+    size_t diff = 0;
+    CHECK(matchesSong(dac->received, toPcm(readRaw("a_44k.raw"), 2), &diff), "the 16-bit PCM equals the file exactly (first difference at %zu)", diff);
+    CHECK(e.getOutputDescription().find("Direct USB · Test DAC · 44.1 kHz · 16-bit") != std::string::npos, "described: %s", e.getOutputDescription().c_str());
+    for (size_t i = 0; i < dac->packetLengths.size(); i++) if (dac->packetLengths[i] % 4 != 0) { CHECK(false, "partial frame in packet %zu", i); break; }
+}
+
+static void testUsb24() {
+    std::printf("[direct USB: 96 kHz / 24-bit]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachFakeDac(e, {44100, 48000, 96000});
+    int f = openFile("hi_96k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+    CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 10000), "the song ends");
+    sleepMs(100);
+    std::lock_guard<std::mutex> l(dac->mu);
+    CHECK(dac->uac2Rate == 96000 && dac->altOf[1] == 2, "96 kHz on the 24-bit alt (%d, alt %d)", dac->uac2Rate, dac->altOf[1]);
+    size_t diff = 0;
+    CHECK(matchesSong(dac->received, toPcm(readRaw("hi_96k.raw"), 3), &diff), "24 bits packed in 3 bytes, exact (first difference at %zu)", diff);
+}
+
+static void testUsbRateConversion() {
+    std::printf("[direct USB: a rate the DAC cannot play is converted by Resonix]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachFakeDac(e, {44100});
+    int f = openFile("c_48k.wav"); CHECK(e.playTrackFd(f), "play a 48 kHz file"); ::close(f);
+    TrackInfo ti = e.getAudioTrackInfo();
+    CHECK(ti.sampleRateHz == 48000 && ti.outputSampleRateHz == 44100, "decoded for 44.1 kHz (%d -> %d)", ti.sampleRateHz, ti.outputSampleRateHz);
+    CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 6000), "the song ends");
+    sleepMs(100);
+    std::lock_guard<std::mutex> l(dac->mu);
+    CHECK(dac->uac2Rate == 44100, "DAC at 44.1 kHz");
+    size_t nonzero = 0; for (uint8_t b : dac->received) if (b) nonzero++;
+    CHECK(nonzero > 40000, "sound came out (%zu non-zero bytes)", nonzero);
+}
+
+static void testUsbMono() {
+    std::printf("[direct USB: a mono song on a stereo alt setting]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachFakeDac(e, {44100});
+    int f = openFile("mono_44k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+    CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 6000), "the song ends");
+    sleepMs(100);
+    std::lock_guard<std::mutex> l(dac->mu);
+    // both channels carry the mono sample
+    const std::vector<uint8_t> mono = toPcm(readRaw("mono_44k.raw"), 2);
+    std::vector<uint8_t> stereo;
+    for (size_t i = 0; i + 1 < mono.size(); i += 2) { stereo.push_back(mono[i]); stereo.push_back(mono[i + 1]); stereo.push_back(mono[i]); stereo.push_back(mono[i + 1]); }
+    size_t diff = 0;
+    CHECK(matchesSong(dac->received, stereo, &diff), "left == right == the mono samples (first difference at %zu)", diff);
+}
+
+static void testUsbGapless() {
+    std::printf("[direct USB: gapless, and the stream stays up between songs]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachFakeDac(e, {44100, 48000});
+    int fa = openFile("a_44k.wav"), fb = openFile("b_44k.wav");
+    CHECK(e.playTrackFd(fa), "play A");
+    CHECK(e.prepareNextFd(fb), "prepare B");
+    ::close(fa); ::close(fb);
+    CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 10000), "both songs end");
+    sleepMs(100);
+    CHECK(!e.consumeGaplessAdvance() || true, "(advance flag consumed)");
+    std::lock_guard<std::mutex> l(dac->mu);
+    std::vector<uint8_t> both = toPcm(readRaw("a_44k.raw"), 2);
+    const std::vector<uint8_t> b = toPcm(readRaw("b_44k.raw"), 2);
+    both.insert(both.end(), b.begin(), b.end());
+    size_t diff = 0;
+    CHECK(matchesSong(dac->received, both, &diff), "A and B back to back, exact (first difference at %zu)", diff);
+    int altSets = 0; for (auto &p : dac->altLog) if (p.second == 1) altSets++;
+    CHECK(altSets == 1, "the alt setting was selected once (%d)", altSets);
+}
+
+static void testUsbSecondSongSameFormat() {
+    std::printf("[direct USB: next song in the same format reuses the open stream]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachFakeDac(e, {44100, 48000});
+    int fa = openFile("a_44k.wav"); CHECK(e.playTrackFd(fa), "play A"); ::close(fa);
+    sleepMs(100);
+    size_t before;
+    { std::lock_guard<std::mutex> l(dac->mu); before = dac->altLog.size(); }
+    int fb = openFile("b_44k.wav"); CHECK(e.playTrackFd(fb), "play B straight after"); ::close(fb);
+    CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 10000), "B ends");
+    std::lock_guard<std::mutex> l(dac->mu);
+    CHECK(dac->altLog.size() == before, "no new alt-setting calls for the same format (%zu -> %zu)", before, dac->altLog.size());
+    CHECK(dac->claimedNow.size() == 2, "interfaces claimed once");
+}
+
+static void testUsbUnplug() {
+    std::printf("[direct USB: the DAC is unplugged]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachFakeDac(e, {44100});
+    int f = openFile("hi_96k.wav");  // not supported at 96k here: converted to 44.1k, long enough to be interrupted
+    CHECK(e.playTrackFd(f), "play"); ::close(f);
+    sleepMs(60);
+    dac->unplugged = true;
+    CHECK(waitUntil([&] { return e.consumeUsbLost(); }, 3000), "the loss is reported");
+    CHECK(!e.isUsbStreaming(), "no longer streaming");
+    std::lock_guard<std::mutex> l(dac->mu);
+    CHECK(dac->claimedNow.empty(), "interfaces handed back");
+}
+
+static void testUsbOffAndFallback() {
+    std::printf("[direct USB: off, or not possible, means Android's audio]\n");
+    {
+        freshPlatform();
+        AudioEngine e; setup(e);
+        fake::FakeDac *dac = attachFakeDac(e, {44100});
+        e.setUsbDirect(false);
+        int f = openFile("a_44k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+        CHECK(!oboe::platform().openedRates.empty(), "Android's stream is used");
+        std::lock_guard<std::mutex> l(dac->mu);
+        CHECK(dac->claimedNow.empty() && dac->received.empty(), "the DAC is left alone");
+    }
+    {
+        freshPlatform();
+        AudioEngine e; setup(e);
+        fake::FakeDac *dac = attachFakeDac(e, {44100}, kUsbAlts, 2);
+        int f = openFile("c_48k.wav");
+        dac->rejectClockSet = true;   // the DAC refuses to be set up
+        CHECK(e.playTrackFd(f), "play still succeeds"); ::close(f);
+        CHECK(!oboe::platform().openedRates.empty(), "fell back to Android's audio");
+        std::lock_guard<std::mutex> l(dac->mu);
+        CHECK(dac->claimedNow.empty(), "and gave the DAC back");
+    }
+    {
+        // a descriptor with nothing playable is not attached at all
+        freshPlatform();
+        AudioEngine e; setup(e);
+        const fake::Bytes junk = {9, 2, 9, 0, 0, 1, 0, 0x80, 50};
+        CHECK(e.attachUsbTransport(std::make_unique<fake::FakeDac>(), junk.data(), junk.size(), "x").empty(), "no PCM stream: refused");
+    }
+}
+
 int main() {
     testPlainTrack();
     testGaplessExact();
@@ -343,6 +549,14 @@ int main() {
     testSeekRevert(false);
     testSeekRevert(true);
     testRetarget();
+    testUsbBasic();
+    testUsb24();
+    testUsbRateConversion();
+    testUsbMono();
+    testUsbGapless();
+    testUsbSecondSongSameFormat();
+    testUsbUnplug();
+    testUsbOffAndFallback();
     std::printf("\n%d checks, %d failed\n", gChecks, gFail);
     return gFail ? 1 : 0;
 }

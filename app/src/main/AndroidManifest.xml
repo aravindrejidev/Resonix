@@ -29,6 +29,12 @@
     <uses-feature
         android:name="android.hardware.audio.pro"
         android:required="false" />
+    <!-- Direct USB output talks to a USB DAC itself (Settings -> Audio). Optional: without USB host
+         support the setting simply finds no device. No extra permission is needed; Android asks the
+         user for access to each device. -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
 
     <application
         android:allowBackup="true"

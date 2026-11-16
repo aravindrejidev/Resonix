@@ -38,6 +38,7 @@ internal object EngineSettings {
             exclusive = s.exclusiveMode,
             bitPerfect = s.bitPerfect,
         )
+        engine.setUsbDirect(s.usbDirect)                 // songs go to the attached USB DAC directly
         engine.setReplayGainMode(s.replayGain.ordinal)  // Off / Track / Album
         engine.setLimiterEnabled(s.peakLimiter)
         engine.setFidelity(

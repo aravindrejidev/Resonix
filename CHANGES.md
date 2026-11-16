@@ -165,3 +165,32 @@ Native: `RingBuffer.h`, `AudioEngine.h/.cpp`, `native-lib.cpp`. Kotlin: `NativeA
 * Reordering songs (drag) in a playlist or the queue.
 * Backing up playlists.
 
+---
+
+# Round 8 – Direct USB output (USB Audio Class driver)
+
+Resonix can now play to a USB DAC **without Android's audio stack**: no AudioFlinger, no mixer, no Android resampler. Off by default (Settings → Audio → *Direct USB output (experimental)*).
+
+## Added
+* **Native USB audio driver** (`UsbAudio`, `UsbTransport`, `UsbfsTransport`, `UsbStreamer`, `UsbDirect`):
+  * `UsbAudio` — parses the device's raw descriptors (UAC1 and UAC2: alt settings, channels, subslot size / bit resolution, rates, endpoints, sync type, feedback endpoint, clock topology incl. selectors / multipliers), asks the UAC2 clock for its rates (GET_RANGE), chooses the alt setting for a song (exact rate and channels; smallest sample size that holds the song's bit depth; mono may use a stereo alt) and the nearest rate when one is missing. Devices that need implicit feedback are refused.
+  * `UsbfsTransport` — the kernel side, over the usbfs file descriptor of the `UsbDeviceConnection` with the ioctls libusb uses (`DISCONNECT_CLAIM`, `SETINTERFACE`, `CONTROL`, `SUBMITURB` / `REAPURBNDELAY` / `DISCARDURB`, `GET_SPEED`, `CONNECT`).
+  * `UsbStreamer` — a thread keeping 12 isochronous transfers of about 4 ms queued, filling each just before it is sent. Packet sizes: exact nominal (remainders carried) without feedback; with an asynchronous endpoint the device's feedback value (10.14 or 16.16, read by plausibility) in 16.16. Silence rather than a stall when the decoder falls behind or playback is paused; failure (unplugged, or erroring for ~0.4 s) is reported once.
+  * `UsbDirect` — the sequence a DAC wants: claim control + streaming interfaces, alt 0, set the clock and read it back, select the alt, stream; and the way out: streaming interfaces released first, the control interface last (the kernel's audio driver binds through it), so Android gets the DAC back.
+* **Engine integration** (`AudioEngine`): `attachUsbDevice` / `detachUsbDevice` / `setUsbDirect` / `consumeUsbLost` / `isUsbStreaming`. When a song starts with a DAC attached and the setting on, Android's stream is closed and the DAC is opened (rate converted in the decoder if the DAC lacks it); the streaming thread pulls audio through the same `renderBlock` as the Oboe callback, so DSP, dither, ReplayGain and **gapless** work unchanged. A song in the same format as the open stream just carries on; anything the DAC cannot do falls back to Android's audio for that song and gives the DAC back.
+* **Kotlin**: `UsbDirectManager` (finds the DAC, asks Android's permission, opens the connection, passes the descriptors and a duplicate of the file descriptor to the engine, reacts to plug / unplug), a Direct USB setting and status line in Settings → Audio, `UsbDirectStatus` on the state bus. In the service the direct output counts like the bit-perfect mixer for volume (Android's volume cannot reach the DAC, so it is folded into the engine level) and for the gapless rule (same rate and bit depth); losing the DAC moves the song back to Android's audio.
+* Manifest: optional `android.hardware.usb.host` feature.
+
+## Checked
+* On a Linux host, with the real `AudioEngine`, `AudioDecoder`, DSP and USB code and a simulated DAC (`tools/host-tests/FakeDac.h`: synthetic UAC2 high-speed and UAC1 full-speed descriptors, control requests, isochronous transfers in virtual time, feedback values, unplugging): 84 USB checks + 130 engine checks, in a normal build, under ThreadSanitizer (no warnings) and AddressSanitizer / UBSan, repeated runs and under CPU load.
+  * Descriptors parse as specified; rates come from GET_RANGE; formats and rates are chosen as described above; implicit feedback is refused.
+  * Packet sizes are exact (44.1 kHz = 5 / 6 frames per microframe, 44 / 45 per frame at full speed), never exceed the endpoint, and follow a DAC whose clock is 0.1 % fast to within 0.2 % (16.16 and 10.14 feedback).
+  * **The bytes the DAC receives are the song, exactly**: 16-bit and 24-bit (in 3 bytes) files, mono to stereo, two songs gaplessly back to back, a rate conversion; no frame lost, repeated or reordered.
+  * Setting up and giving back: alt 0 → clock → alt, interfaces claimed once, released streaming-first; a DAC that refuses the clock, or reads back another rate, is not used; unplugging is noticed and the interfaces are handed back; with the setting off, or when the DAC cannot play a song, Android's audio is used.
+* `UsbDirectManager`, `PlaybackStateBus` and the engine wrapper compile with Kotlin 2.4.20 against stubs. The service, settings and UI changes were parsed only.
+
+## NOT checked (please read)
+* **No real DAC was involved.** The usbfs layer (`UsbfsTransport`) compiles but has only ever run against nothing; real DACs differ (stalled requests, quirky feedback, clock selectors, how long they need to settle) and Android's permission flow, SELinux and kernel versions are untested. Expect to have to adjust something on the first real DAC.
+* The NDK build (including armeabi-v7a) was not run.
+* Not supported: DSD / DoP, hardware volume (UAC feature unit), implicit feedback, high-bandwidth (multi-transaction) endpoints are only read, not exercised.
+

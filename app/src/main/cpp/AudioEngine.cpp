@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "UsbfsTransport.h"
 
 #include <android/log.h>
 #include <algorithm>
@@ -20,6 +21,7 @@ namespace {
 // onAudioReady never allocates. Streams typically request far fewer
 // frames per callback than this.
 constexpr size_t kMaxScratchFrames = 8192;
+constexpr int kMonoChunk = 2048;  // frames of a mono song converted to stereo at a time (direct USB)
 
 std::string describeSampleRate(int32_t hz) {
     char buf[32];
@@ -39,6 +41,11 @@ AudioEngine::AudioEngine()
 }
 
 AudioEngine::~AudioEngine() {
+    {
+        // The USB streaming thread pulls from this engine: it has to be gone before anything else is.
+        std::lock_guard<std::mutex> lock(mStreamLock);
+        mUsb.reset();
+    }
     stopDecodeThread();
     std::lock_guard<std::mutex> lock(mStreamLock);
     closeStreamLocked();
@@ -134,12 +141,43 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
         std::lock_guard<std::mutex> lock(mStreamLock);
         mRingBuffer->flushFromProducer();
 
-        bool needsReopen = !mStream ||
+        // Direct USB: Resonix drives the DAC itself and Android's audio is not involved at all.
+        bool usbPlaying = false;
+        if (mUsb && mUsbDirectWanted.load(std::memory_order_relaxed)) {
+            closeStreamLocked();  // Android's stream is not wanted while the DAC is ours
+            if (mUsb->prepare()) {
+                const int usbRate = usb::nearestSupportedRate(mUsb->caps(), info.outputSampleRateHz);
+                if (usbRate > 0 && usbRate != info.outputSampleRateHz) {
+                    // The DAC cannot play this rate: convert it here, with Resonix's resampler.
+                    LOGI("The DAC cannot play %d Hz; converting to %d Hz in Resonix", info.outputSampleRateHz, usbRate);
+                    active().close();
+                    targetRate = usbRate;
+                    active().setTargetSampleRate(targetRate);
+                    active().setResamplerQuality(mResamplerQuality.load(std::memory_order_relaxed));
+                    TrackInfo again;
+                    if (!openDecoder(&again) || again.outputSampleRateHz <= 0 || again.channelCount <= 0) {
+                        LOGE("Reopening the track at %d Hz failed: %s", usbRate, label);
+                        return false;
+                    }
+                    info = again;
+                    publishInfo(info);
+                }
+                usbPlaying = openUsbLocked(info);
+            }
+            if (!usbPlaying) {
+                LOGW("Direct USB cannot play this song: using Android's audio instead");
+                closeUsbLocked(true);  // the DAC is Android's again
+            }
+        } else if (mUsb) {
+            closeUsbLocked(true);  // direct USB is off: leave the DAC to Android
+        }
+
+        bool needsReopen = !usbPlaying && (!mStream ||
                 mStream->getSampleRate() != info.outputSampleRateHz ||
                 mStream->getChannelCount() != info.channelCount ||
                 mStreamApiSetting != mOutputApi.load(std::memory_order_relaxed) ||
                 mStreamExclusiveSetting != mExclusive.load(std::memory_order_relaxed) ||
-                mStreamPlanGeneration != mPlanGeneration.load(std::memory_order_relaxed);
+                mStreamPlanGeneration != mPlanGeneration.load(std::memory_order_relaxed));
 
         if (needsReopen) {
             closeStreamLocked();
@@ -222,6 +260,9 @@ void AudioEngine::resumeTrack() {
 // grabbing an exclusive stream) can't be started any more — reopen it rather than
 // leaving the Play button dead.
 bool AudioEngine::ensureStreamStartedLocked() {
+    if (mUsb && mUsb->isOpen()) {
+        return !mUsb->failed();  // the DAC streams all the time; "playing" only decides what goes into it
+    }
     int32_t sampleRate;
     int32_t channels;
     {
@@ -729,6 +770,157 @@ void AudioEngine::decodeThreadLoop() {
             }
         }
     }
+}
+
+// ---- Direct USB ----------------------------------------------------------------------------
+
+std::string AudioEngine::attachUsbDevice(int fd, const uint8_t *descriptors, size_t length, const std::string &name) {
+    return attachUsbTransport(std::make_unique<usb::UsbfsTransport>(fd), descriptors, length, name);
+}
+
+std::string AudioEngine::attachUsbTransport(std::unique_ptr<usb::UsbTransport> transport, const uint8_t *descriptors,
+                                            size_t length, const std::string &name) {
+    usb::DeviceCaps caps;
+    if (!transport || !usb::parseDescriptors(descriptors, length, &caps)) {
+        return "";
+    }
+    std::lock_guard<std::mutex> lock(mStreamLock);
+    if (mUsb) {
+        closeUsbLocked(true);
+        mUsb.reset();
+    }
+    const std::string summary = usb::describe(caps);
+    mUsb = std::make_unique<usb::UsbDirect>(std::move(transport), std::move(caps), name);
+    mUsb->setFailureCallback([this] { mUsbFailedHint.store(true, std::memory_order_release); });
+    mUsbLost.store(false, std::memory_order_relaxed);
+    mUsbFailedHint.store(false, std::memory_order_relaxed);
+    LOGI("USB DAC attached: %s (%s)", name.c_str(), summary.c_str());
+    return summary;
+}
+
+void AudioEngine::detachUsbDevice() {
+    std::lock_guard<std::mutex> lock(mStreamLock);
+    if (mUsb) {
+        closeUsbLocked(true);
+        mUsb.reset();
+    }
+    mPlanGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+void AudioEngine::setUsbDirect(bool enabled) {
+    mUsbDirectWanted.store(enabled, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mStreamLock);
+    if (!enabled && mUsb) {
+        closeUsbLocked(true);
+    }
+    mPlanGeneration.fetch_add(1, std::memory_order_relaxed);  // the next song starts afresh
+}
+
+void AudioEngine::closeUsbLocked(bool releaseInterfaces) {
+    if (!mUsb) return;
+    mUsb->close();
+    if (releaseInterfaces) mUsb->releaseInterfaces();
+    mUsbActive.store(false, std::memory_order_relaxed);
+}
+
+bool AudioEngine::isUsbStreaming() {
+    // No lock: this is polled from the UI thread while a song may be loading.
+    return mUsbActive.load(std::memory_order_relaxed) && !mUsbFailedHint.load(std::memory_order_acquire);
+}
+
+bool AudioEngine::consumeUsbLost() {
+    if (mUsbFailedHint.exchange(false, std::memory_order_acq_rel)) {
+        std::lock_guard<std::mutex> lock(mStreamLock);
+        if (mUsb && mUsb->isOpen() && mUsb->failed()) {
+            LOGE("The USB DAC stopped answering");
+            closeUsbLocked(true);
+            mIsPlaying.store(false, std::memory_order_relaxed);
+            mUsbLost.store(true, std::memory_order_relaxed);
+        }
+    }
+    return mUsbLost.exchange(false, std::memory_order_relaxed);
+}
+
+void AudioEngine::noteTrackProgress() {
+    // "Decoder at end-of-stream + nothing queued" = the song is over, unless another one is being loaded,
+    // a seek is on its way or a prepared song is about to take over (same rule as the Oboe callback).
+    const bool trackDone = !mLoading.load(std::memory_order_relaxed) &&
+                           mPendingSeekMs.load(std::memory_order_relaxed) < 0 &&
+                           !mNextReady.load(std::memory_order_acquire) &&
+                           active().isEndOfStream() && mRingBuffer->availableToRead() == 0;
+    // The DAC keeps streaming (silence) afterwards, so report the end only once.
+    if (trackDone && mIsPlaying.exchange(false, std::memory_order_relaxed)) {
+        mTrackFinishedEvent.store(true, std::memory_order_relaxed);
+    }
+}
+
+bool AudioEngine::openUsbLocked(const TrackInfo &info) {
+    const int rate = info.outputSampleRateHz;
+    const int channels = info.channelCount;
+    const int bits = info.bitDepth > 0 ? info.bitDepth : 0;
+
+    if (mUsb->matches(rate, channels, bits)) {
+        // The DAC already runs exactly this stream: the song carries on through it.
+        std::lock_guard<std::mutex> lock(mTrackInfoLock);
+        mOutputDescription = mUsb->describeOpen();
+        return true;
+    }
+
+    closeUsbLocked(false);  // the streaming thread must be gone before the engine's side is reconfigured
+    bool duplicateMono = false;
+    const usb::StreamFormat *f = usb::chooseFormat(mUsb->caps(), rate, channels, bits, &duplicateMono);
+    if (f == nullptr) return false;
+
+    const int format = f->subslotBytes == 2 ? kFormatI16 : (f->subslotBytes == 3 ? kFormatI24 : kFormatI32);
+    mActiveFormat.store(format, std::memory_order_relaxed);
+    const size_t scratch = kMaxScratchFrames * static_cast<size_t>(channels);
+    if (mReadScratch.size() < scratch) mReadScratch.resize(scratch);
+    if (mUsbMonoScratch.size() < static_cast<size_t>(kMonoChunk) * 4) mUsbMonoScratch.resize(static_cast<size_t>(kMonoChunk) * 4);
+    mDsp.configure(static_cast<double>(rate), channels);
+
+    const int deviceFrameBytes = f->frameBytes();
+    const int sampleBytes = f->subslotBytes;
+    auto fill = [this, format, channels, duplicateMono, deviceFrameBytes, sampleBytes](uint8_t *dst, int frames) {
+        // Paused, finished or still loading: keep the DAC fed with silence rather than letting it starve.
+        if (!mIsPlaying.load(std::memory_order_relaxed)) {
+            std::memset(dst, 0, static_cast<size_t>(frames) * deviceFrameBytes);
+            return;
+        }
+        int done = 0;
+        if (!duplicateMono) {
+            while (done < frames) {
+                const int n = renderBlock(dst + static_cast<size_t>(done) * deviceFrameBytes, frames - done, channels, format);
+                if (n <= 0) break;
+                done += n;
+            }
+        } else {
+            // A mono song on a stereo alt setting: the same sample on both channels.
+            while (done < frames) {
+                const int chunk = std::min(frames - done, kMonoChunk);
+                const int n = renderBlock(mUsbMonoScratch.data(), chunk, 1, format);
+                if (n <= 0) break;
+                for (int i = 0; i < n; i++) {
+                    uint8_t *out = dst + static_cast<size_t>(done + i) * deviceFrameBytes;
+                    const uint8_t *in = mUsbMonoScratch.data() + static_cast<size_t>(i) * sampleBytes;
+                    std::memcpy(out, in, sampleBytes);
+                    std::memcpy(out + sampleBytes, in, sampleBytes);
+                }
+                done += n;
+            }
+        }
+        if (done < frames) {  // the decoder fell behind: silence for the rest
+            std::memset(dst + static_cast<size_t>(done) * deviceFrameBytes, 0, static_cast<size_t>(frames - done) * deviceFrameBytes);
+        }
+        noteTrackProgress();
+    };
+
+    usb::UsbDirect::OpenResult result;
+    mUsbFailedHint.store(false, std::memory_order_relaxed);
+    if (!mUsb->open(rate, channels, bits, std::move(fill), &result)) return false;
+    mUsbActive.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mTrackInfoLock);
+    mOutputDescription = mUsb->describeOpen();
+    return true;
 }
 
 // ---- Gapless -------------------------------------------------------------------------------

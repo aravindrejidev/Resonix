@@ -103,6 +103,7 @@ No accounts. No ads. No telemetry. The app does not even ask for the Internet pe
 #### Output & Devices
 - **Output API** — Auto, AAudio or OpenSL ES. If one cannot open, the other is used.
 - **Exclusive mode** — asks for sole access to the stream, which skips Android's mixer and its effects *when the device grants it*. Many outputs do not; Resonix checks what it really got (see *When Android would resample* below).
+- **Direct USB output (experimental, off by default)** — Resonix talks USB Audio Class to the DAC itself over the USB device Android hands out and plays to it without Android's audio stack at all: no AudioFlinger, no mixer, no Android resampler, no effects. See *Direct USB output* below.
 - **Gapless playback** — the next song is opened while the current one plays, and playback runs straight from the last sample of one into the first of the next, sample for sample. ReplayGain changes on exactly that sample. It applies whenever both songs come out as the same stream (same output rate and channel count; with the USB bit-perfect mixer also the same bit depth); otherwise the stream has to be reopened and there is a short gap, as in any player. Switch it off in Settings.
 - **Bit-perfect sample rates** — each song plays at its own rate, or the nearest rate the output accepts. Switch it off and everything goes out at the device's own rate, so the stream never reopens between songs.
 - **USB DAC bit-perfect (Android 14+)** — picks the best format the DAC offers and asks the system for a strict stream: no conversion, no resampling, no effects.
@@ -193,6 +194,18 @@ flowchart LR
 
 > [!TIP]
 > The DSP chain handles up to 8 channels. Stereo width and balance apply to stereo audio; other layouts get the equalizer, gain, bass and limiter stages.
+
+### Direct USB output
+
+The only way to be certain nothing between Resonix and the DAC touches the samples is to leave Android's audio stack out of it. With **Settings → Audio → Direct USB output** on and a USB DAC plugged in, Resonix asks for Android's permission to use the DAC, takes it over (Android's own USB audio driver lets go of it), selects the sample rate on the DAC's clock and the alt setting that holds the song's bit depth, and streams isochronous USB packets itself.
+
+- **What it speaks:** USB Audio Class 1 and 2, plain PCM at 16 / 24 (in 3 or 4 bytes) / 32 bits, any number of channels the DAC offers. Asynchronous DACs are followed through their feedback endpoint (the DAC runs its own clock and tells the host how fast), adaptive and synchronous ones at the exact nominal rate. A mono song goes to both channels of a stereo DAC.
+- **The format follows the song.** The sample rate is set exactly; the smallest sample size that still holds the song's bit depth is chosen (a 16-bit file goes out as 16 bits, a 24-bit file as 24). A rate the DAC does not have is converted once, by Resonix's resampler, to the nearest one it has. Gapless playback keeps running through it; the DAC stays set up while songs of the same format follow each other.
+- **Volume** is Resonix's own (Direct volume control; the hardware keys work): Android's volume cannot reach a device it is not involved with. A volume below full scale costs bits, like any digital volume.
+- **Costs and limits.** While it is on the DAC is Resonix's alone: other apps cannot use it, and unplugging it mid-song moves playback back to Android's audio. DACs that take their feedback from a capture stream ("implicit feedback"), DSD and hardware volume controls are not supported. Some DACs also have a microphone input; Android then wants its microphone permission for them, which is a system rule, not something Resonix uses.
+- **If anything is not right** (the DAC refuses the setting, a rate or channel layout it lacks) that song simply plays through Android's audio as usual, and the Signal card says which output it really used.
+
+It is experimental: it was written against the USB specification and tested with a simulated DAC, and USB DACs differ in the details. Please report a DAC that misbehaves, with its name and what the Signal card says.
 
 ### When Android would resample
 
@@ -416,7 +429,7 @@ Locally, export `RESONIX_KEYSTORE_PATH`, `RESONIX_KEYSTORE_PASSWORD`, `RESONIX_K
 
 ### Host tests for the sound engine
 
-`tools/host-tests/` builds the real `AudioEngine`, `AudioDecoder` and DSP on a Linux machine against a stand-in for Oboe and checks gapless hand-over (sample for sample), ReplayGain on the boundary sample, seeks across a hand-over, platform-rate handling and the ring buffer. See the header of `tools/host-tests/run.sh` for the packages it needs.
+`tools/host-tests/` builds the real `AudioEngine`, `AudioDecoder`, DSP and USB driver on a Linux machine against a stand-in for Oboe and a simulated USB DAC, and checks gapless hand-over (sample for sample), ReplayGain on the boundary sample, seeks across a hand-over, platform-rate handling, the ring buffer, and Direct USB: descriptor parsing, format and rate choice, packet sizes, feedback following, the order of setting a DAC up and handing it back, unplugging, and bit-exact output to the DAC. See the header of `tools/host-tests/run.sh` for the packages it needs.
 
 <a id="architecture"></a>
 ## 🏗️ Architecture & Tech Stack
@@ -452,7 +465,7 @@ flowchart TB
 
 | Folder | What it does |
 |---|---|
-| `app/src/main/cpp/` | The sound engine: `AudioEngine`, `AudioDecoder` (FFmpeg), `TrackProber`, and the header-only `Dsp.h`, `Eq.h`, `Limiter.h`, `Quantizer.h` and `RingBuffer.h`, plus the JNI bridge in `native-lib.cpp` |
+| `app/src/main/cpp/` | The sound engine: `AudioEngine`, `AudioDecoder` (FFmpeg), `TrackProber`, and the header-only `Dsp.h`, `Eq.h`, `Limiter.h`, `Quantizer.h` and `RingBuffer.h`, the Direct USB output driver (`UsbAudio`, `UsbDirect`, `UsbStreamer`, `UsbfsTransport`: descriptor parsing and format choice, setting a DAC up and handing it back, the isochronous streaming thread with feedback handling, the usbfs transport), plus the JNI bridge in `native-lib.cpp` |
 | `app/src/main/cpp/ffmpeg/` | FFmpeg headers and prebuilt shared libraries for each ABI |
 | `audio/` | Kotlin side of the engine: `NativeAudioEngine` (JNI wrapper), track probing, codec and quality naming |
 | `playback/` | `PlaybackService`, queue manager, audio focus, output routing and planning, Direct volume control, USB bit-perfect, and the `AudioTrack` fallback driver |
@@ -503,8 +516,8 @@ These keep the audio thread glitch-free, and any change to the engine should res
 
 ```mermaid
 pie showData title What Resonix is made of (non-blank lines of code)
-    "Kotlin (app and interface)" : 10828
-    "C++ (sound engine)" : 3366
+    "Kotlin (app and interface)" : 12760
+    "C++ (sound engine)" : 4874
     "Build scripts and CI" : 507
 ```
 
@@ -526,6 +539,7 @@ pie showData title What Resonix is made of (non-blank lines of code)
 - [x] Gapless playback: sample-exact hand-over between songs, ReplayGain switched on the boundary sample
 - [x] The engine checks the real device rate and converts itself instead of letting Android's mixer resample (Android 14+ verified, older versions for the built-in outputs)
 - [x] A release workflow that publishes signed APKs (`.github/workflows/release.yml`)
+- [x] Direct USB output: UAC1 / UAC2 PCM straight to a USB DAC with feedback-endpoint clocking, no AudioFlinger (experimental)
 - [x] Ring buffer indices are 64-bit on every ABI (a 32-bit index wrapped after about 3 hours of 192 kHz on armeabi-v7a)
 - [x] Room schema export and a migration path (version 3 is the baseline, see `data/Migrations.kt`); the library is no longer wiped on a schema change
 - [x] Settings-only backup rules: the library database and folder grants are not restored onto another phone

@@ -1,4 +1,6 @@
 #include <jni.h>
+#include <vector>
+#include <unistd.h>
 
 #include "AudioEngine.h"
 
@@ -133,6 +135,67 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeSetPlatformMixerRate(
     if (engine != nullptr) {
         engine->setPlatformMixerRate(static_cast<int>(hz), static_cast<int>(routeKey));
     }
+}
+
+// --- Direct USB ----------------------------------------------------------------------
+
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeUsbAttach(
+        JNIEnv *env, jobject /*thiz*/, jlong handle, jint fd, jbyteArray descriptors, jstring name) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine == nullptr || fd < 0 || descriptors == nullptr) {
+        return env->NewStringUTF("");
+    }
+    const jsize length = env->GetArrayLength(descriptors);
+    std::vector<uint8_t> raw(static_cast<size_t>(length));
+    env->GetByteArrayRegion(descriptors, 0, length, reinterpret_cast<jbyte *>(raw.data()));
+    std::string deviceName = "USB DAC";
+    if (name != nullptr) {
+        const char *chars = env->GetStringUTFChars(name, nullptr);
+        if (chars != nullptr) {
+            deviceName = chars;
+            env->ReleaseStringUTFChars(name, chars);
+        }
+    }
+    // The engine gets its own descriptor: the Kotlin side keeps the UsbDeviceConnection open as before.
+    const int own = dup(static_cast<int>(fd));
+    if (own < 0) {
+        return env->NewStringUTF("");
+    }
+    const std::string summary = engine->attachUsbDevice(own, raw.data(), raw.size(), deviceName);
+    return env->NewStringUTF(summary.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeUsbDetach(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->detachUsbDevice();
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetUsbDirect(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jboolean enabled) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setUsbDirect(enabled == JNI_TRUE);
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeConsumeUsbLost(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return (engine != nullptr && engine->consumeUsbLost()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeIsUsbStreaming(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    return (engine != nullptr && engine->isUsbStreaming()) ? JNI_TRUE : JNI_FALSE;
 }
 
 // --- Track info getters -----------------------------------------------
