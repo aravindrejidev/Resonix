@@ -1,6 +1,8 @@
 package com.resonix.player
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -53,6 +55,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.resonix.player.data.PlaylistTrack
+import com.resonix.player.playback.PlaybackStateBus
 import com.resonix.player.data.Track
 import com.resonix.player.ui.PlayerViewModel
 import com.resonix.player.ui.SettingsState
@@ -280,6 +283,13 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                     bottomInset = bottomInset,
                     outputRoute = outputRoute,
                     usbDirectStatus = usbDirectStatus.message,
+                    onCopyUsbReport = {
+                        val text = PlaybackStateBus.usbReport()
+                            ?: "Resonix USB report\n(the playback service is not running yet — play a song once, then copy the report again)"
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Resonix USB report", text))
+                        AppMessages.post("USB report copied — paste it into your message")
+                    },
                     page = settingsPage,
                     onPageChange = { settingsPage = it },
                     onChange = { transform -> viewModel.settings.update(transform) },
@@ -311,6 +321,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                 onDelete = { id -> viewModel.deletePlaylist(id) },
                 onPlay = { id, shuffle, start -> viewModel.playPlaylist(id, shuffle, start) },
                 onRemoveEntry = { entryId -> viewModel.removeFromPlaylist(entryId) },
+                onReorder = { id, ordered -> viewModel.reorderPlaylist(id, ordered) },
                 onTrackMenu = { menuTrack = it },
                 onClose = {
                     openPlaylistId = null
@@ -419,6 +430,7 @@ private fun ResonixApp(viewModel: PlayerViewModel, settings: SettingsState) {
                 onQueueJump = { index -> viewModel.playQueueIndex(index) },
                 onQueueRemove = { index -> viewModel.removeFromQueue(index) },
                 onQueueClear = { viewModel.clearUpcoming() },
+                onQueueMove = { from, to -> viewModel.moveQueueItem(from, to) },
                 onTrackMenu = { menuTrack = it },
             )
         }

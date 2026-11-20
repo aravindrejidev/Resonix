@@ -1,0 +1,68 @@
+name: Apply uploaded changes
+
+# For working from a phone: upload "Resonix-changes.zip" (the zip of changed files) to the ROOT of the repository
+# (Add file -> Upload files). This workflow unpacks it over the project, commits the result, deletes the zip and then
+# starts "Manual Build" for you. Nothing else has to be done by hand.
+
+on:
+  push:
+    paths:
+      - 'Resonix-changes.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Unpack the zip over the project
+        id: unpack
+        run: |
+          if [ ! -f Resonix-changes.zip ]; then
+            echo "No Resonix-changes.zip in the repository root: nothing to apply."
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rm -rf /tmp/chg && mkdir /tmp/chg
+          unzip -q Resonix-changes.zip -d /tmp/chg
+          SRC=/tmp/chg/Resonix-main
+          [ -d "$SRC" ] || SRC=/tmp/chg
+          cp -a "$SRC"/. .
+          # Files the zip says to delete ("## Delete" section of CHANGED_FILES.md: lines like - `docs/f`)
+          if [ -f /tmp/chg/CHANGED_FILES.md ]; then
+            awk '/^## Delete/{f=1;next} /^## /{f=0} f' /tmp/chg/CHANGED_FILES.md \
+              | sed -n 's/^- `\([^`]*\)`.*/\1/p' \
+              | while read -r path; do [ -n "$path" ] && git rm -rf --ignore-unmatch -- "$path"; done
+          fi
+          rm -f Resonix-changes.zip CHANGED_FILES.md
+          [ -f gradlew ] && chmod +x gradlew
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: steps.unpack.outputs.applied == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          [ -f gradlew ] && git update-index --chmod=+x gradlew || true
+          if git diff --cached --quiet; then
+            echo "The zip changed nothing."
+          else
+            git commit -m "Apply Resonix changes"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Start the build
+        if: steps.unpack.outputs.applied == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --ref "${GITHUB_REF_NAME}"

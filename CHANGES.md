@@ -194,3 +194,23 @@ Resonix can now play to a USB DAC **without Android's audio stack**: no AudioFli
 * The NDK build (including armeabi-v7a) was not run.
 * Not supported: DSD / DoP, hardware volume (UAC feature unit), implicit feedback, high-bandwidth (multi-transaction) endpoints are only read, not exercised.
 
+---
+
+# Round 9 – the DAC's volume control, reordering, and working from a phone
+
+## Added
+* **DAC hardware volume** (Direct USB). Feature Units are read from the descriptors (UAC1: control bit 1; UAC2: bits 3:2 read/write), the unit on the stream's input terminal is chosen, the range (UAC2 `GET_RANGE`, UAC1 `GET_MIN / MAX / RES`) and the current level are read when the DAC is first set up. `setGain()` is split in the engine: the DAC's volume takes as much of the attenuation as its range and step allow (its 0 dB, or its maximum if that is lower, counts as unity), software takes the remainder, so the samples stay untouched wherever the DAC can do it. The level is set *before* sound goes out; later changes go through a helper thread (the UI thread never waits for a control transfer; the latest request wins); the DAC is put back to where it was when Resonix lets go. Setting **Use the DAC's own volume control** (on by default); with it off the DAC is left at its unity and the engine does the volume.
+* **USB report** (Settings → Audio → *Copy USB report*): phone, app, Android's view of the USB bus (vendor / product ids, permission, interfaces), the engine's state, the DAC's alt settings / rates / endpoints / sync type / feedback endpoint / volume range, and the last 300 driver log lines (every setup step and its result, the stream's periodic statistics). It replaces `adb logcat` for someone with only a phone.
+* **Drag to reorder** the queue and the songs of a playlist: a grip at the end of every row. The row follows the finger, the rows it passes slide aside, the list is reordered on the spot and the change is sent once on release (`PlaybackQueueManager.moveInQueue`, `PlaylistDao.reorder`; the gapless follower is prepared again when the next song changes). The arithmetic (`ReorderMath`) is plain Kotlin, tested separately (936 checks, including where the playing song ends up for every combination).
+* **Phone-friendly workflows**: `apply-changes.yml` (upload `Resonix-changes.zip` to the repository root and everything else happens: unpack, delete the listed files, mark `gradlew` executable, commit, start the build); `build.yml` now logs to a file, puts only the errors on the run's Summary page for copying, and keeps the whole log as an artifact.
+
+## Fixed
+* A latent lock hazard in the engine: the DAC object was destroyed while the pointer mutex was held. It is now destroyed after the lock is released.
+
+## Checked
+* The 160 engine checks (now including: a −20 dB level done entirely by the DAC with the PCM untouched, −80 dB with the DAC at its minimum and the rest in software, the setting off, a level change during playback reaching the DAC, the DAC put back on release, the report's contents) and 102 USB checks (feature units in UAC1 and UAC2, range queries, the planning arithmetic including DACs whose maximum is below 0 dB, the asynchronous path, restore) pass in a normal build, under ThreadSanitizer and AddressSanitizer / UBSan.
+* The Compose parts of the reordering (and the clipboard action) were written like the rest of the UI and are **not compiled**.
+
+## Not done
+* **DSD (DoP)**. It needs a bit-exact path (no volume, no resampling) and a real DAC to tell whether the DAC recognises the marker bytes; it is better built once Direct USB has been seen working on a real DAC.
+

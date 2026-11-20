@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "UsbLog.h"
 #include "UsbfsTransport.h"
 
 #include <android/log.h>
@@ -44,7 +45,8 @@ AudioEngine::~AudioEngine() {
     {
         // The USB streaming thread pulls from this engine: it has to be gone before anything else is.
         std::lock_guard<std::mutex> lock(mStreamLock);
-        mUsb.reset();
+        closeUsbLocked(true);
+        resetUsbLocked();
     }
     stopDecodeThread();
     std::lock_guard<std::mutex> lock(mStreamLock);
@@ -149,7 +151,7 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
                 const int usbRate = usb::nearestSupportedRate(mUsb->caps(), info.outputSampleRateHz);
                 if (usbRate > 0 && usbRate != info.outputSampleRateHz) {
                     // The DAC cannot play this rate: convert it here, with Resonix's resampler.
-                    LOGI("The DAC cannot play %d Hz; converting to %d Hz in Resonix", info.outputSampleRateHz, usbRate);
+                    USB_LOGI("The DAC cannot play %d Hz; converting to %d Hz in Resonix", info.outputSampleRateHz, usbRate);
                     active().close();
                     targetRate = usbRate;
                     active().setTargetSampleRate(targetRate);
@@ -165,7 +167,7 @@ bool AudioEngine::startPlayback(const std::function<bool(TrackInfo *)> &openDeco
                 usbPlaying = openUsbLocked(info);
             }
             if (!usbPlaying) {
-                LOGW("Direct USB cannot play this song: using Android's audio instead");
+                USB_LOGW("Direct USB cannot play this song: using Android's audio instead");
                 closeUsbLocked(true);  // the DAC is Android's again
             }
         } else if (mUsb) {
@@ -355,6 +357,27 @@ bool AudioEngine::consumeTrackFinishedEvent() {
 }
 
 void AudioEngine::setGain(double linearGain) {
+    mRequestedGain.store(linearGain, std::memory_order_relaxed);
+    applyGain();
+}
+
+void AudioEngine::applyGain() {
+    const double requested = mRequestedGain.load(std::memory_order_relaxed);
+    if (mUsbHwVolume.load(std::memory_order_acquire)) {
+        const std::shared_ptr<usb::UsbDirect> usb = usbPtr();
+        if (usb && usb->hasHardwareVolume()) {
+            const double gainDb = requested > 1e-9 ? 20.0 * std::log10(requested) : -240.0;
+            double residualDb = 0.0;
+            usb->planVolume256(gainDb, &residualDb);
+            usb->requestHardwareVolume(gainDb);  // asynchronous: this may be the UI thread
+            mDsp.setMasterGain(std::pow(10.0, std::min(residualDb, 0.0) / 20.0));  // what the DAC could not do
+            return;
+        }
+    }
+    setGainSoftware(requested);
+}
+
+void AudioEngine::setGainSoftware(double linearGain) {
     double clamped = std::max(0.0, std::min(linearGain, kMaxGain));
     mGain.store(clamped, std::memory_order_relaxed);
     mDsp.setMasterGain(clamped);
@@ -787,14 +810,17 @@ std::string AudioEngine::attachUsbTransport(std::unique_ptr<usb::UsbTransport> t
     std::lock_guard<std::mutex> lock(mStreamLock);
     if (mUsb) {
         closeUsbLocked(true);
-        mUsb.reset();
+        resetUsbLocked();
     }
     const std::string summary = usb::describe(caps);
-    mUsb = std::make_unique<usb::UsbDirect>(std::move(transport), std::move(caps), name);
+    {
+        std::lock_guard<std::mutex> ptrLock(mUsbPtrMutex);
+        mUsb = std::make_shared<usb::UsbDirect>(std::move(transport), std::move(caps), name);
+    }
     mUsb->setFailureCallback([this] { mUsbFailedHint.store(true, std::memory_order_release); });
     mUsbLost.store(false, std::memory_order_relaxed);
     mUsbFailedHint.store(false, std::memory_order_relaxed);
-    LOGI("USB DAC attached: %s (%s)", name.c_str(), summary.c_str());
+    USB_LOGI("USB DAC attached: %s (%s)", name.c_str(), summary.c_str());
     return summary;
 }
 
@@ -802,9 +828,19 @@ void AudioEngine::detachUsbDevice() {
     std::lock_guard<std::mutex> lock(mStreamLock);
     if (mUsb) {
         closeUsbLocked(true);
-        mUsb.reset();
+        resetUsbLocked();
     }
     mPlanGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+void AudioEngine::resetUsbLocked() {
+    std::shared_ptr<usb::UsbDirect> old;
+    {
+        std::lock_guard<std::mutex> ptrLock(mUsbPtrMutex);
+        old = std::move(mUsb);
+    }
+    // `old` is destroyed here, after the lock is released: tearing a DAC down means control transfers, and
+    // nobody asking for the pointer (the UI thread, setting the volume) should have to wait for them.
 }
 
 void AudioEngine::setUsbDirect(bool enabled) {
@@ -819,8 +855,30 @@ void AudioEngine::setUsbDirect(bool enabled) {
 void AudioEngine::closeUsbLocked(bool releaseInterfaces) {
     if (!mUsb) return;
     mUsb->close();
-    if (releaseInterfaces) mUsb->releaseInterfaces();
+    if (releaseInterfaces) mUsb->releaseInterfaces();  // also puts the DAC's volume back
     mUsbActive.store(false, std::memory_order_relaxed);
+    if (mUsbHwVolume.exchange(false, std::memory_order_acq_rel)) applyGain();  // the volume is the engine's again
+}
+
+void AudioEngine::setUsbHardwareVolume(bool enabled) {
+    mUsbHwVolumeWanted.store(enabled, std::memory_order_relaxed);  // from the next song on
+}
+
+std::string AudioEngine::usbReport() {
+    std::string out;
+    out += std::string("direct USB wanted: ") + (mUsbDirectWanted.load() ? "yes" : "no") +
+           ", streaming now: " + (isUsbStreaming() ? "yes" : "no") +
+           ", DAC volume control wanted: " + (mUsbHwVolumeWanted.load() ? "yes" : "no") +
+           ", carrying the volume: " + (mUsbHwVolume.load() ? "yes" : "no") + "\n";
+    out += "output: " + getOutputDescription() + "\n";
+    const std::shared_ptr<usb::UsbDirect> usb = usbPtr();
+    if (usb) {
+        out += "attached DAC: " + usb->detailText();
+    } else {
+        out += "no DAC attached to the engine\n";
+    }
+    out += "--- driver log ---\n" + usb::UsbLog::instance().dump();
+    return out;
 }
 
 bool AudioEngine::isUsbStreaming() {
@@ -832,7 +890,7 @@ bool AudioEngine::consumeUsbLost() {
     if (mUsbFailedHint.exchange(false, std::memory_order_acq_rel)) {
         std::lock_guard<std::mutex> lock(mStreamLock);
         if (mUsb && mUsb->isOpen() && mUsb->failed()) {
-            LOGE("The USB DAC stopped answering");
+            USB_LOGE("The USB DAC stopped answering");
             closeUsbLocked(true);
             mIsPlaying.store(false, std::memory_order_relaxed);
             mUsbLost.store(true, std::memory_order_relaxed);
@@ -916,7 +974,28 @@ bool AudioEngine::openUsbLocked(const TrackInfo &info) {
 
     usb::UsbDirect::OpenResult result;
     mUsbFailedHint.store(false, std::memory_order_relaxed);
-    if (!mUsb->open(rate, channels, bits, std::move(fill), &result)) return false;
+
+    // The DAC's volume is put right before any sound goes out: either carrying the volume, or at its
+    // unity when the engine does the volume (so a level left over from earlier cannot linger).
+    bool hardwareVolume = false;
+    if (mUsb->hasHardwareVolume()) {
+        const double requested = mRequestedGain.load(std::memory_order_relaxed);
+        if (mUsbHwVolumeWanted.load(std::memory_order_relaxed)) {
+            const double gainDb = requested > 1e-9 ? 20.0 * std::log10(requested) : -240.0;
+            double residualDb = 0.0;
+            hardwareVolume = mUsb->setHardwareVolumeBlocking(gainDb, &residualDb);
+        } else {
+            double ignored = 0.0;
+            mUsb->setHardwareVolumeBlocking(0.0, &ignored);
+        }
+    }
+    mUsbHwVolume.store(hardwareVolume, std::memory_order_release);
+    applyGain();  // the software share of the volume (all of it, or what the DAC's range could not do)
+
+    if (!mUsb->open(rate, channels, bits, std::move(fill), &result)) {
+        if (mUsbHwVolume.exchange(false, std::memory_order_acq_rel)) applyGain();
+        return false;
+    }
     mUsbActive.store(true, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(mTrackInfoLock);
     mOutputDescription = mUsb->describeOpen();

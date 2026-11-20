@@ -1,5 +1,9 @@
 name: Manual Build
 
+# Run it from the Actions tab (Run workflow). Afterwards open the run:
+#   * it succeeded  -> "resonix-debug-apk" under Artifacts is the installable debug APK (a zip with the .apk inside)
+#   * it failed     -> the Summary page lists just the errors (copy them); "build-log" under Artifacts has the whole log
+
 on:
   workflow_dispatch:
 
@@ -28,7 +32,7 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-      
+
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses > /dev/null || true
 
@@ -36,7 +40,33 @@ jobs:
         run: sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
 
       - name: Assemble debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --no-daemon --console=plain --stacktrace 2>&1 | tee build.log
+
+      - name: Summarise the errors
+        if: failure()
+        run: |
+          {
+            echo "## The build failed"
+            echo
+            echo "Copy everything in the box below and paste it into your message."
+            echo
+            echo '```'
+            # Kotlin ("e: file:///...") and C++ ("error:") errors, then Gradle's own explanation.
+            grep -E '^e: |: error: |error: |FAILED|What went wrong' -A2 build.log \
+              | sed -e 's#file:///[^ ]*/work/[^/]*/[^/]*/##' -e 's#/home/runner/work/[^/]*/[^/]*/##' \
+              | grep -v '^--$' | head -n 80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the full log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

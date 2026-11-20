@@ -541,6 +541,104 @@ static void testUsbOffAndFallback() {
     }
 }
 
+static int peakOf(const std::vector<uint8_t> &pcm16) {
+    int peak = 0;
+    for (size_t i = 0; i + 1 < pcm16.size(); i += 2) peak = std::max(peak, std::abs((int)(int16_t)(pcm16[i] | (pcm16[i + 1] << 8))));
+    return peak;
+}
+
+// A DAC with a volume control (feature unit): -60 .. 0 dB in 0.5 dB steps, sitting at -3 dB.
+static fake::FakeDac *attachVolumeDac(AudioEngine &e, const std::vector<int> &rates) {
+    auto dac = std::make_unique<fake::FakeDac>();
+    dac->speedup = 3;
+    dac->clockRates = rates;
+    fake::FakeDac *raw = dac.get();
+    const fake::Bytes d = fake::uac2Descriptors(kUsbAlts, 2, false, 400, true);
+    CHECK(!e.attachUsbTransport(std::move(dac), d.data(), d.size(), "Volume DAC").empty(), "attached");
+    e.setUsbDirect(true);
+    return raw;
+}
+
+static void testUsbHardwareVolume() {
+    std::printf("[direct USB: the DAC's own volume control carries the volume]\n");
+    {   // -20 dB entirely in the DAC: the samples stay untouched
+        freshPlatform();
+        AudioEngine e; setup(e);
+        fake::FakeDac *dac = attachVolumeDac(e, {44100});
+        e.setGain(0.1);   // -20 dB
+        int f = openFile("a_44k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+        CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 8000), "the song ends");
+        sleepMs(100);
+        const std::string report = e.usbReport();   // not while the fake's lock is held
+        std::lock_guard<std::mutex> l(dac->mu);
+        CHECK(!dac->volumeSets.empty() && dac->volumeSets.back().second == -20 * 256, "the DAC was set to -20 dB (%d)", dac->volumeSets.empty() ? 0 : dac->volumeSets.back().second);
+        size_t diff = 0;
+        CHECK(matchesSong(dac->received, toPcm(readRaw("a_44k.raw"), 2), &diff), "and the PCM is the file, exactly — no bits thrown away (first difference at %zu)", diff);
+        CHECK(report.find("carrying the volume: yes") != std::string::npos, "reported");
+    }
+    {   // more than the DAC can do: the DAC to its minimum, the rest in software
+        freshPlatform();
+        AudioEngine e; setup(e);
+        fake::FakeDac *dac = attachVolumeDac(e, {44100});
+        e.setGain(1e-4);  // -80 dB
+        int f = openFile("a_44k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+        CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 8000), "the song ends");
+        sleepMs(100);
+        std::lock_guard<std::mutex> l(dac->mu);
+        CHECK(dac->volumeSets.back().second == -60 * 256, "the DAC at its minimum");
+        // software did the remaining -20 dB: the file's peak, times 0.1
+        const int filePeak = peakOf(toPcm(readRaw("a_44k.raw"), 2));
+        const int peak = peakOf(dac->received);
+        CHECK(peak > filePeak * 0.1 * 0.9 && peak < filePeak * 0.1 * 1.1, "peak %d (the file's %d x 0.1)", peak, filePeak);
+    }
+    {   // turned off: the engine does it all, and the DAC is brought to its unity
+        freshPlatform();
+        AudioEngine e; setup(e);
+        fake::FakeDac *dac = attachVolumeDac(e, {44100});
+        e.setUsbHardwareVolume(false);
+        e.setGain(0.1);
+        int f = openFile("a_44k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+        CHECK(waitUntil([&] { return e.consumeTrackFinishedEvent(); }, 8000), "the song ends");
+        sleepMs(100);
+        std::lock_guard<std::mutex> l(dac->mu);
+        CHECK(dac->volumeSets.back().second == 0, "the DAC left at 0 dB (%d)", dac->volumeSets.back().second);
+        const int filePeak = peakOf(toPcm(readRaw("a_44k.raw"), 2));
+        const int peak = peakOf(dac->received);
+        CHECK(peak > filePeak * 0.1 * 0.9 && peak < filePeak * 0.1 * 1.1, "software volume: peak %d (the file's %d x 0.1)", peak, filePeak);
+    }
+    {   // a change during playback reaches the DAC, and letting go puts the DAC back
+        freshPlatform();
+        AudioEngine e; setup(e);
+        fake::FakeDac *dac = attachVolumeDac(e, {44100});
+        int f = openFile("hi_96k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+        sleepMs(100);
+        e.setGain(0.5);   // -6.02 dB, snapped to -6.0
+        CHECK(waitUntil([&] { return dac->volume() == -6 * 256; }, 2000), "the new level reaches the DAC");
+        e.setUsbDirect(false);   // lets go of the DAC (it stays attached, so it can still be looked at)
+        CHECK(dac->volume() == -3 * 256, "the DAC is put back to -3 dB when Resonix lets go (%d)", dac->volume());
+        std::lock_guard<std::mutex> l(dac->mu);
+        CHECK(dac->claimedNow.empty(), "and handed back");
+    }
+}
+
+static void testUsbReport() {
+    std::printf("[direct USB: the report for finding out what a DAC does]\n");
+    freshPlatform();
+    AudioEngine e; setup(e);
+    fake::FakeDac *dac = attachVolumeDac(e, {44100, 96000});
+    (void)dac;
+    int f = openFile("a_44k.wav"); CHECK(e.playTrackFd(f), "play"); ::close(f);
+    sleepMs(200);
+    const std::string r = e.usbReport();
+    CHECK(r.find("Volume DAC") != std::string::npos, "names the DAC");
+    CHECK(r.find("iface 1 alt 2: 2 ch, 24-bit in 3 bytes, OUT 0x01") != std::string::npos, "lists the alt settings");
+    CHECK(r.find("async") != std::string::npos && r.find("0x81") != std::string::npos, "sync type and feedback endpoint");
+    CHECK(r.find("rates [44100,96000]") != std::string::npos, "the rates the DAC gave");
+    CHECK(r.find("volume control: unit 4") != std::string::npos, "the volume control");
+    CHECK(r.find("--- driver log ---") != std::string::npos && r.find("Direct USB:") != std::string::npos, "the driver's own log");
+    CHECK(r.find("Direct USB · Volume DAC · 44.1 kHz · 16-bit") != std::string::npos, "what is playing");
+}
+
 int main() {
     testPlainTrack();
     testGaplessExact();
@@ -557,6 +655,8 @@ int main() {
     testUsbSecondSongSameFormat();
     testUsbUnplug();
     testUsbOffAndFallback();
+    testUsbHardwareVolume();
+    testUsbReport();
     std::printf("\n%d checks, %d failed\n", gChecks, gFail);
     return gFail ? 1 : 0;
 }

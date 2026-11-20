@@ -39,6 +39,7 @@ internal object EngineSettings {
             bitPerfect = s.bitPerfect,
         )
         engine.setUsbDirect(s.usbDirect)                 // songs go to the attached USB DAC directly
+        engine.setUsbHardwareVolume(s.usbHardwareVolume) // ...with the DAC's own volume control, if it has one
         engine.setReplayGainMode(s.replayGain.ordinal)  // Off / Track / Album
         engine.setLimiterEnabled(s.peakLimiter)
         engine.setFidelity(

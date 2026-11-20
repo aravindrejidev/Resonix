@@ -43,6 +43,12 @@ object PlaybackStateBus {
         _snapshot.value = snapshot
     }
 
+    /** Set by the service while it runs: builds the text of the "USB report" (null when the service is not running). */
+    @Volatile
+    var usbReportProvider: (() -> String)? = null
+
+    fun usbReport(): String? = usbReportProvider?.invoke()
+
     private val _usbDirect = MutableStateFlow(UsbDirectStatus())
     val usbDirect: StateFlow<UsbDirectStatus> = _usbDirect.asStateFlow()
 

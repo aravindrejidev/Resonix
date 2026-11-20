@@ -147,6 +147,7 @@ fun NowPlayingScreen(
     onQueueJump: (index: Int) -> Unit,
     onQueueRemove: (index: Int) -> Unit,
     onQueueClear: () -> Unit,
+    onQueueMove: (from: Int, to: Int) -> Unit,
     /** Press and hold on a queued song: its actions (play next, playlists …). */
     onTrackMenu: (Track) -> Unit,
     modifier: Modifier = Modifier,
@@ -263,6 +264,7 @@ fun NowPlayingScreen(
                 onClear = onQueueClear,
                 onTrackMenu = onTrackMenu,
                 onClose = { queueOpen = false },
+                onMove = onQueueMove,
             )
         }
     }

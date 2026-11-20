@@ -2,9 +2,13 @@
 // A DAC driven directly by Resonix over USB, bypassing Android's audio stack (AudioFlinger) altogether:
 // claims the audio interfaces, selects the sample rate and alt setting, and streams.
 
+#include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "UsbAudio.h"
 #include "UsbStreamer.h"
@@ -53,6 +57,20 @@ public:
     void close();               // stops streaming and switches the interface off; the DAC stays ours
     void releaseInterfaces();   // hands the DAC back to Android's own driver
 
+    // --- The DAC's own volume control --------------------------------------------------------
+    // True after prepare() when the DAC has a volume control and told us its range.
+    bool hasHardwareVolume() const { return mCaps.volume.usable(); }
+    // Sets the DAC's volume for a gain of [gainDb] (relative to its own unity: 0 dB where its range reaches
+    // it, else its maximum) as far as its range and step allow, now. [residualDb] gets what is left over
+    // for software to do (0 when the DAC covers it all).
+    bool setHardwareVolumeBlocking(double gainDb, double *residualDb);
+    // Same, without waiting: queued for a helper thread, the latest request wins. Any thread.
+    void requestHardwareVolume(double gainDb);
+    // What the DAC's setting and the software remainder would be for [gainDb] (no I/O).
+    int planVolume256(double gainDb, double *residualDb) const;
+    // The detailed description of the DAC, as of the last prepare(); safe from any thread.
+    std::string detailText() const;
+
     // Called (from the streaming thread) when the stream dies. Applies to streams opened afterwards.
     void setFailureCallback(std::function<void()> callback) { mOnFailed = std::move(callback); }
 
@@ -61,6 +79,10 @@ public:
 
 private:
     int setClockRate(const StreamFormat &f, int rate);
+    bool sendVolume(int value256);
+    void volumeLoop();
+    void restoreVolume();
+    void refreshDetailText();
     bool claim(int interfaceNumber);
 
     std::unique_ptr<UsbTransport> mTransport;
@@ -68,6 +90,16 @@ private:
     std::string mName;
     std::unique_ptr<UsbStreamer> mStreamer;
     std::vector<int> mClaimed;
+    std::mutex mControlMutex;               // one control transfer sequence at a time (setup, volume)
+    std::mutex mVolumeMutex;
+    std::condition_variable mVolumeCv;
+    std::thread mVolumeThread;
+    bool mVolumeHave = false;
+    bool mVolumeStop = false;
+    double mVolumePending = 0.0;
+    int mVolumeApplied256 = 0x7FFFFFFF;     // what the DAC was last set to (none yet)
+    mutable std::mutex mInfoMutex;
+    std::string mDetailText;
     bool mPrepared = false;
     bool mOpen = false;
     OpenResult mCurrent;

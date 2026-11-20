@@ -125,9 +125,9 @@ No accounts. No ads. No telemetry. The app does not even ask for the Internet pe
 - **Equalizer** — a 10-band **graphic** EQ (31 Hz to 16 kHz, ±12 dB, 9 presets) and a **parametric** EQ with up to 16 bands (Peak, Low / High shelf, Low / High pass, Notch; 20 Hz to 20 kHz, ±24 dB, Q 0.1 to 20) with a live response graph and AutoEQ / Equalizer APO paste and copy. One of the two is active at a time. It runs in 64-bit in front of the rest of the chain, turns itself down for headroom so boosting cannot clip, and is skipped completely when flat.
 
 #### Playback
-- **Queue** — Play, Shuffle, Next / Previous and automatic advance; unreadable files are skipped. Open **Queue** from the three-dot menu of the Now Playing screen to see everything in play order (the song playing highlighted, played ones dimmed): tap a song to jump to it, the cross takes it out, and the bin clears everything after the current song.
+- **Queue** — Play, Shuffle, Next / Previous and automatic advance; unreadable files are skipped. Open **Queue** from the three-dot menu of the Now Playing screen to see everything in play order (the song playing highlighted, played ones dimmed): tap a song to jump to it, the cross takes it out, drag the grip at the end of a row to move it, and the bin clears everything after the current song.
 - **Song actions** — press and hold any song (Home, Search, a playlist, the queue) for **Play next**, **Add to queue** and **Add to playlist** (an existing one, or a new one made on the spot).
-- **Playlists** — the playlist icon on Home (or the menu) opens them. Create, rename and delete playlists, add songs from anywhere, remove single songs, and Play or Shuffle one. A playlist can hold the same song twice, keeps its place when a folder is rescanned (songs are referred to by their file, not by library rows), and a song whose file has gone is simply hidden until it returns. Playlists live in the app's database and are not part of Android's backup, because they point at folders this phone has been given access to.
+- **Playlists** — the playlist icon on Home (or the menu) opens them. Create, rename and delete playlists, add songs from anywhere, remove single songs, drag songs into another order, and Play or Shuffle one. A playlist can hold the same song twice, keeps its place when a folder is rescanned (songs are referred to by their file, not by library rows), and a song whose file has gone is simply hidden until it returns. Playlists live in the app's database and are not part of Android's backup, because they point at folders this phone has been given access to.
 - **Media session & notification** — Previous, Play / Pause and Next on the lock screen, in the notification and on headset or Bluetooth buttons.
 - **Audio focus** with ducking, and an automatic pause when headphones are unplugged.
 - **Background playback** — a foreground media service with a wake lock keeps music going with the screen off.
@@ -201,9 +201,9 @@ The only way to be certain nothing between Resonix and the DAC touches the sampl
 
 - **What it speaks:** USB Audio Class 1 and 2, plain PCM at 16 / 24 (in 3 or 4 bytes) / 32 bits, any number of channels the DAC offers. Asynchronous DACs are followed through their feedback endpoint (the DAC runs its own clock and tells the host how fast), adaptive and synchronous ones at the exact nominal rate. A mono song goes to both channels of a stereo DAC.
 - **The format follows the song.** The sample rate is set exactly; the smallest sample size that still holds the song's bit depth is chosen (a 16-bit file goes out as 16 bits, a 24-bit file as 24). A rate the DAC does not have is converted once, by Resonix's resampler, to the nearest one it has. Gapless playback keeps running through it; the DAC stays set up while songs of the same format follow each other.
-- **Volume** is Resonix's own (Direct volume control; the hardware keys work): Android's volume cannot reach a device it is not involved with. A volume below full scale costs bits, like any digital volume.
+- **Volume.** Android's volume cannot reach a device it is not involved with, so the volume is Resonix's own (Direct volume control; the hardware keys work). If the DAC has a volume control of its own (a USB Audio Feature Unit) Resonix uses it: the DAC attenuates and the samples stay untouched, so no bits are thrown away. Where the DAC's range does not go low enough, the rest is done in software; where the DAC has none, or **Use the DAC's own volume control** is off, the volume is done in software, which costs bits like any digital volume. Whatever level the DAC was at is put back when Resonix lets go of it.
 - **Costs and limits.** While it is on the DAC is Resonix's alone: other apps cannot use it, and unplugging it mid-song moves playback back to Android's audio. DACs that take their feedback from a capture stream ("implicit feedback"), DSD and hardware volume controls are not supported. Some DACs also have a microphone input; Android then wants its microphone permission for them, which is a system rule, not something Resonix uses.
-- **If anything is not right** (the DAC refuses the setting, a rate or channel layout it lacks) that song simply plays through Android's audio as usual, and the Signal card says which output it really used.
+- **If anything is not right** (the DAC refuses the setting, a rate or channel layout it lacks) that song simply plays through Android's audio as usual, and the Signal card says which output it really used. **Settings → Audio → Copy USB report** copies a plain-text report (what the DAC says about itself — alt settings, rates, endpoints, volume control — what Resonix did step by step, and the last log lines) to paste into a message; no computer or adb needed.
 
 It is experimental: it was written against the USB specification and tested with a simulated DAC, and USB DACs differ in the details. Please report a DAC that misbehaves, with its name and what the Signal card says.
 
@@ -417,6 +417,15 @@ The workflow builds FFmpeg `n9.0.1` with the NDK for Android 8.0+, as an LGPL-on
 
 ---
 
+### Working from a phone
+
+Everything can be done from the GitHub website or app, no computer needed:
+
+1. **Apply a zip of changes:** upload `Resonix-changes.zip` to the *root* of the repository (Add file → Upload files). The **Apply uploaded changes** workflow unpacks it over the project, commits, removes the zip and starts **Manual Build**. (The workflow file `.github/workflows/apply-changes.yml` has to be in the repository first: Add file → Create new file, paste its text once.)
+2. **Get the app:** open Actions → the finished **Manual Build** run → Artifacts → `resonix-debug-apk` (a zip containing the APK; unzip it with the phone's file manager and install the `.apk`).
+3. **If the build fails:** open the run → *Summary*. It lists only the errors; copy them into a message. The whole log is under Artifacts → `build-log`.
+4. **If a DAC misbehaves:** Settings → Audio → Copy USB report, and paste it into a message.
+
 ### Signed release builds
 
 Create a keystore once and keep it safe (updates must be signed with the same key):
@@ -516,8 +525,8 @@ These keep the audio thread glitch-free, and any change to the engine should res
 
 ```mermaid
 pie showData title What Resonix is made of (non-blank lines of code)
-    "Kotlin (app and interface)" : 12760
-    "C++ (sound engine)" : 4874
+    "Kotlin (app and interface)" : 13138
+    "C++ (sound engine)" : 5314
     "Build scripts and CI" : 507
 ```
 
@@ -535,7 +544,9 @@ pie showData title What Resonix is made of (non-blank lines of code)
 - [x] Sleep timer that survives closing the app
 - [x] Full-frame Now Playing with cover-tinted background, themes and accent colours
 - [x] Equalizer engine: 10-band graphic and 16-band parametric, 64-bit biquads with automatic headroom
-- [x] Queue view (jump, remove, clear) and playlists (database version 4, migration 3 → 4)
+- [x] Queue view (jump, remove, clear, drag to reorder) and playlists (database version 4, migration 3 → 4; drag to reorder)
+- [x] Direct USB: the DAC's own volume control (UAC Feature Unit), a copyable USB report for debugging without adb
+- [x] Phone-friendly workflows: apply an uploaded zip, a build summary that lists only the errors
 - [x] Gapless playback: sample-exact hand-over between songs, ReplayGain switched on the boundary sample
 - [x] The engine checks the real device rate and converts itself instead of letting Android's mixer resample (Android 14+ verified, older versions for the built-in outputs)
 - [x] A release workflow that publishes signed APKs (`.github/workflows/release.yml`)

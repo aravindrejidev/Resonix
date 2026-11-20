@@ -335,6 +335,64 @@ static void testDirect() {
     }
 }
 
+static void testVolume() {
+    std::printf("[the DAC's own volume control]\n");
+    {
+        FakeDac dac;
+        DeviceCaps caps = parseOrDie(fake::uac2Descriptors(kAlts, 2, false, 400, true));
+        CHECK(caps.volume.present && caps.volume.unitId == 4 && caps.volume.channels == std::vector<int>{0}, "UAC2: feature unit 4, master channel");
+        CHECK(!caps.volume.rangeKnown, "range not read before the DAC is asked");
+        queryVolumeRange(dac, &caps, caps.controlInterface);
+        CHECK(caps.volume.rangeKnown && caps.volume.min256 == -60 * 256 && caps.volume.max256 == 0 && caps.volume.res256 == 128, "range -60..0 dB step 0.5 (%d..%d step %d)", caps.volume.min256, caps.volume.max256, caps.volume.res256);
+        CHECK(caps.volume.haveOriginal && caps.volume.original256 == -3 * 256, "remembers where the DAC was");
+        CHECK(describeDetailed(caps).find("volume control: unit 4") != std::string::npos, "shown in the report");
+    }
+    {
+        FakeDac dac; dac.volMin256 = -100 * 256; dac.volMax256 = 12 * 256; dac.volRes256 = 64;
+        DeviceCaps caps = parseOrDie(fake::uac1Descriptors({{1, 2, 2, 16, {44100, 48000}, false}}, true));
+        CHECK(caps.volume.present && caps.volume.unitId == 3 && caps.volume.uac == 1, "UAC1: feature unit 3");
+        queryVolumeRange(dac, &caps, caps.controlInterface);
+        CHECK(caps.volume.rangeKnown && caps.volume.max256 == 12 * 256 && caps.volume.res256 == 64, "UAC1 GET_MIN / MAX / RES");
+    }
+    {
+        DeviceCaps caps = parseOrDie(fake::uac2Descriptors(kAlts));
+        CHECK(!caps.volume.present, "a DAC without one is recognised");
+    }
+    {   // planning: how much the DAC does, how much is left for software
+        FakeDac dac;
+        auto transport = std::make_unique<FakeDac>();
+        FakeDac *raw = transport.get();
+        DeviceCaps caps = parseOrDie(fake::uac2Descriptors(kAlts, 2, false, 400, true));
+        UsbDirect d(std::move(transport), caps, "Vol DAC");
+        d.setSettleMs(0);
+        CHECK(d.prepare() && d.hasHardwareVolume(), "prepared, volume known");
+        double residual = 1;
+        CHECK(d.planVolume256(0.0, &residual) == 0 && std::fabs(residual) < 1e-9, "0 dB: the DAC at 0 dB, nothing left");
+        CHECK(d.planVolume256(-20.0, &residual) == -20 * 256 && std::fabs(residual) < 1e-9, "-20 dB entirely in the DAC");
+        CHECK(d.planVolume256(-80.0, &residual) == -60 * 256 && std::fabs(residual + 20.0) < 1e-6, "-80 dB: the DAC to its minimum, -20 dB for software (%.3f)", residual);
+        const int snapped = d.planVolume256(-20.2, &residual);
+        CHECK(snapped % 128 == 0 && std::fabs(snapped / 256.0 + 20.2) <= 0.26 && std::fabs(residual) <= 0.26, "snapped to the 0.5 dB step: %d, rest %.3f", snapped, residual);
+        // blocking set and the async path
+        CHECK(d.setHardwareVolumeBlocking(-20.0, &residual), "set");
+        d.requestHardwareVolume(-30.0);
+        d.requestHardwareVolume(-31.0);
+        for (int i = 0; i < 200 && raw->volume() != -31 * 256; i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(raw->volume() == -31 * 256, "the latest request reaches the DAC (%d)", raw->volume());
+        d.releaseInterfaces();
+        CHECK(raw->volume() == -3 * 256, "put back to where it was (%d)", raw->volume());
+    }
+    {   // a DAC whose maximum is below 0 dB: its maximum is "unity"
+        auto transport = std::make_unique<FakeDac>();
+        transport->volMin256 = -60 * 256; transport->volMax256 = -6 * 256;
+        DeviceCaps caps = parseOrDie(fake::uac2Descriptors(kAlts, 2, false, 400, true));
+        UsbDirect d(std::move(transport), caps, "Quiet DAC");
+        d.prepare();
+        double residual = 1;
+        CHECK(d.planVolume256(0.0, &residual) == -6 * 256 && std::fabs(residual) < 1e-9, "unity = the DAC's maximum");
+        CHECK(d.planVolume256(-10.0, &residual) == -16 * 256, "-10 dB below that");
+    }
+}
+
 int main() {
     testParseUac2();
     testParseUac1();
@@ -343,6 +401,7 @@ int main() {
     testPlanner();
     testStreaming();
     testDirect();
+    testVolume();
     std::printf("\n%d checks, %d failed\n", gChecks, gFail);
     return gFail ? 1 : 0;
 }

@@ -22,6 +22,7 @@ constexpr int kSubStreaming = 2;
 // Class-specific audio-control descriptor subtypes (UAC1 and UAC2 share the first few numbers).
 constexpr int kAcHeader = 0x01;
 constexpr int kAcInputTerminal = 0x02;
+constexpr int kAcFeatureUnit = 0x06;
 constexpr int kAcClockSource = 0x0A;
 constexpr int kAcClockSelector = 0x0B;
 constexpr int kAcClockMultiplier = 0x0C;
@@ -35,6 +36,12 @@ inline uint32_t u32(const uint8_t *p) {
     return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
            (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
+
+struct FeatureUnit {
+    int id = 0;
+    int source = 0;
+    std::vector<int> volumeChannels;   // 0 = master, else logical channel; only those the host may set
+};
 
 struct ClockEntity {
     int kind = 0;               // kAcClockSource / Selector / Multiplier
@@ -92,6 +99,7 @@ bool parseDescriptors(const uint8_t *data, size_t length, DeviceCaps *caps) {
 
     std::map<int, ClockEntity> clocks;
     std::map<int, int> terminalClock;  // UAC2 input terminal id -> the clock entity it runs on
+    std::vector<FeatureUnit> featureUnits;
     int firstClockSource = 0;
     int acVersion = 0;
     bool implicitFeedbackSeen = false;
@@ -164,6 +172,24 @@ bool parseDescriptors(const uint8_t *data, size_t length, DeviceCaps *caps) {
                         acVersion = (u16(d + 3) >= 0x0200) ? 2 : 1;
                     } else if (subtype == kAcInputTerminal && acVersion == 2 && len >= 8) {
                         terminalClock[d[3]] = d[7];
+                    } else if (subtype == kAcFeatureUnit && len >= 7) {
+                        FeatureUnit fu;
+                        fu.id = d[3];
+                        fu.source = d[4];
+                        if (acVersion == 2) {
+                            const int entries = (len - 6) / 4;
+                            for (int i = 0; i < entries; i++) {
+                                // bits 3:2 = volume: 01 read-only, 11 read/write
+                                if (((u32(d + 5 + 4 * i) >> 2) & 3u) == 3u) fu.volumeChannels.push_back(i);
+                            }
+                        } else {
+                            const int size = d[5];
+                            const int entries = size > 0 ? (len - 7) / size : 0;
+                            for (int i = 0; i < entries; i++) {
+                                if (d[6 + i * size] & 0x02) fu.volumeChannels.push_back(i);  // bit 1 = volume
+                            }
+                        }
+                        featureUnits.push_back(fu);
                     } else if (subtype == kAcClockSource && len >= 4) {
                         clocks[d[3]].kind = kAcClockSource;
                         if (firstClockSource == 0) firstClockSource = d[3];
@@ -293,7 +319,70 @@ bool parseDescriptors(const uint8_t *data, size_t length, DeviceCaps *caps) {
         if (!f.implicitFeedback) caps->formats.push_back(f);
     }
     finalizeRates(caps);
+
+    // The volume control on the playback path: the feature unit fed by the stream's input terminal,
+    // else any feature unit that has one.
+    if (!caps->formats.empty()) {
+        const int terminal = caps->formats[0].terminalLink;
+        const FeatureUnit *chosen = nullptr;
+        for (const FeatureUnit &fu : featureUnits) {
+            if (fu.volumeChannels.empty()) continue;
+            if (fu.source == terminal) { chosen = &fu; break; }
+            if (chosen == nullptr) chosen = &fu;
+        }
+        if (chosen != nullptr) {
+            caps->volume.present = true;
+            caps->volume.unitId = chosen->id;
+            caps->volume.uac = caps->uac == 2 ? 2 : 1;
+            // The master channel alone if it has a volume control, else every channel that has one.
+            const bool master = std::find(chosen->volumeChannels.begin(), chosen->volumeChannels.end(), 0) != chosen->volumeChannels.end();
+            caps->volume.channels = master ? std::vector<int>{0} : chosen->volumeChannels;
+        }
+    }
     return !caps->formats.empty();
+}
+
+void queryVolumeRange(UsbTransport &transport, DeviceCaps *caps, int controlInterface) {
+    VolumeControl &v = caps->volume;
+    if (!v.present || v.channels.empty() || controlInterface < 0) return;
+    const int ch = v.channels[0];
+    const uint16_t value = static_cast<uint16_t>((0x02 << 8) | ch);  // VOLUME_CONTROL, channel
+    const uint16_t index = static_cast<uint16_t>((v.unitId << 8) | (controlInterface & 0xFF));
+    auto s16 = [](const uint8_t *p) { return static_cast<int16_t>(static_cast<uint16_t>(p[0] | (p[1] << 8))); };
+    uint8_t buf[2 + 6 * 16] = {};
+    if (v.uac == 2) {
+        int n = transport.control(0xA1, 0x02, value, index, buf, 2, 300);  // GET_RANGE: how many sub-ranges
+        if (n != 2) return;
+        const int subRanges = std::min(u16(buf), 16);
+        if (subRanges < 1) return;
+        n = transport.control(0xA1, 0x02, value, index, buf, static_cast<uint16_t>(2 + 6 * subRanges), 300);
+        if (n < 8) return;
+        int lo = 32767, hi = -32768;
+        for (int i = 0; i < subRanges && 2 + 6 * (i + 1) <= n; i++) {
+            lo = std::min<int>(lo, s16(buf + 2 + 6 * i));
+            hi = std::max<int>(hi, s16(buf + 4 + 6 * i));
+        }
+        v.min256 = lo;
+        v.max256 = hi;
+        v.res256 = std::max<int>(1, s16(buf + 6));
+    } else {
+        uint8_t a[2] = {}, b[2] = {}, c[2] = {};
+        if (transport.control(0xA1, 0x82, value, index, a, 2, 300) != 2) return;  // GET_MIN
+        if (transport.control(0xA1, 0x83, value, index, b, 2, 300) != 2) return;  // GET_MAX
+        if (transport.control(0xA1, 0x84, value, index, c, 2, 300) != 2) return;  // GET_RES
+        v.min256 = s16(a);
+        v.max256 = s16(b);
+        v.res256 = std::max<int>(1, s16(c));
+    }
+    if (v.max256 < v.min256) return;
+    // Where the DAC is now, to put it back when Resonix lets go.
+    uint8_t cur[2] = {};
+    const uint8_t getCur = (v.uac == 2) ? 0x01 : 0x81;
+    if (transport.control(0xA1, getCur, value, index, cur, 2, 300) == 2) {
+        v.original256 = s16(cur);
+        v.haveOriginal = true;
+    }
+    v.rangeKnown = true;
 }
 
 void finalizeRates(DeviceCaps *caps) {
@@ -403,6 +492,37 @@ int nearestSupportedRate(const DeviceCaps &caps, int wanted) {
         if (r > wanted) return r;
     }
     return rates.back();
+}
+
+std::string describeDetailed(const DeviceCaps &caps) {
+    std::string out = "UAC" + std::to_string(caps.uac) + ", control interface " + std::to_string(caps.controlInterface) +
+                      (caps.hasCapture ? ", has a microphone stream" : "") + "\n";
+    for (const StreamFormat &f : caps.formats) {
+        char line[400];
+        std::string rates;
+        for (size_t i = 0; i < f.rates.size(); i++) rates += (i ? "," : "") + std::to_string(f.rates[i]);
+        std::snprintf(line, sizeof(line),
+                      "  iface %d alt %d: %d ch, %d-bit in %d bytes, OUT 0x%02X maxpkt %d interval %d, sync %s, feedback %s0x%02X (%d B)%s, rates [%s]",
+                      f.interfaceNumber, f.altSetting, f.channels, f.bitResolution, f.subslotBytes, f.endpoint, f.maxPacketBytes,
+                      f.interval, f.sync == SyncType::kAsync ? "async" : (f.sync == SyncType::kAdaptive ? "adaptive" : (f.sync == SyncType::kSync ? "synchronous" : "none")),
+                      f.feedbackEndpoint ? "" : "none ", f.feedbackEndpoint, f.feedbackMaxPacketBytes,
+                      f.uac == 2 ? (" clock " + std::to_string(f.clockId)).c_str() : "", rates.c_str());
+        out += line;
+        out += '\n';
+    }
+    if (caps.volume.present) {
+        char line[200];
+        if (caps.volume.rangeKnown) {
+            std::snprintf(line, sizeof(line), "  volume control: unit %d, %.1f .. %.1f dB step %.2f dB, was %.1f dB\n", caps.volume.unitId,
+                          caps.volume.min256 / 256.0, caps.volume.max256 / 256.0, caps.volume.res256 / 256.0, caps.volume.original256 / 256.0);
+        } else {
+            std::snprintf(line, sizeof(line), "  volume control: unit %d (range not read yet)\n", caps.volume.unitId);
+        }
+        out += line;
+    } else {
+        out += "  no volume control on the playback path\n";
+    }
+    return out;
 }
 
 std::string describe(const DeviceCaps &caps) {

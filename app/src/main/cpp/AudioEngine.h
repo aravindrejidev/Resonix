@@ -119,6 +119,13 @@ public:
     // then dead and the caller should play again through Android's audio.
     bool consumeUsbLost();
     bool isUsbStreaming();
+    // Use the DAC's own volume control (when it has one) for the volume set with setGain(): the DAC
+    // attenuates after the digital-to-analog stage's own resolution instead of the engine throwing bits away.
+    // On by default; takes effect with the next song.
+    void setUsbHardwareVolume(bool enabled);
+    // Everything useful for finding out why a DAC does not work: what the DAC said about itself, what the
+    // driver did, and the last log lines. Safe from any thread.
+    std::string usbReport();
 
     void pauseTrack();
     void resumeTrack();
@@ -255,7 +262,18 @@ private:
     // that openUsbLocked() builds; everything else about it lives in usb::UsbDirect.
     bool openUsbLocked(const TrackInfo &info);
     void noteTrackProgress();   // end-of-track bookkeeping for outputs that are not Oboe's callback
-    std::unique_ptr<usb::UsbDirect> mUsb;         // guarded by mStreamLock
+    std::shared_ptr<usb::UsbDirect> mUsb;         // written under mStreamLock and mUsbPtrMutex; read under either
+    std::mutex mUsbPtrMutex;
+    std::shared_ptr<usb::UsbDirect> usbPtr() {
+        std::lock_guard<std::mutex> lock(mUsbPtrMutex);
+        return mUsb;
+    }
+    void applyGain();                             // setGain(): the DSP gain, or the DAC's volume plus the rest
+    void setGainSoftware(double linearGain);
+    void resetUsbLocked();                        // forget the DAC (stream lock held)
+    std::atomic<double> mRequestedGain{1.0};
+    std::atomic<bool> mUsbHwVolumeWanted{true};
+    std::atomic<bool> mUsbHwVolume{false};        // the DAC's volume control is carrying the volume
     std::atomic<bool> mUsbDirectWanted{false};
     std::atomic<bool> mUsbLost{false};
     std::atomic<bool> mUsbFailedHint{false};      // set by the streaming thread when the DAC dies; cleaned up by consumeUsbLost()

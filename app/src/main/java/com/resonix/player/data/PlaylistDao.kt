@@ -57,6 +57,9 @@ abstract class PlaylistDao {
     @Query("DELETE FROM playlist_tracks WHERE id = :entryId")
     abstract suspend fun deleteEntry(entryId: Long)
 
+    @Query("UPDATE playlist_tracks SET position = :position WHERE id = :entryId AND playlistId = :playlistId")
+    abstract suspend fun setPosition(playlistId: Long, entryId: Long, position: Int)
+
     @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId")
     abstract suspend fun deleteEntriesOf(playlistId: Long)
 
@@ -78,6 +81,14 @@ abstract class PlaylistDao {
         val id = insertPlaylist(Playlist(name = name, createdAtSec = createdAtSec))
         appendTracks(id, trackUris)
         return id
+    }
+
+    /** Gives the entries the places 0, 1, 2 … in the order given (the songs of one playlist, dragged into a new order). */
+    @Transaction
+    open suspend fun reorder(playlistId: Long, entryIdsInOrder: List<Long>) {
+        for ((position, entryId) in entryIdsInOrder.withIndex()) {
+            setPosition(playlistId, entryId, position)
+        }
     }
 
     @Transaction

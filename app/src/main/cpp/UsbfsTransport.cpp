@@ -1,6 +1,6 @@
 #include "UsbfsTransport.h"
 
-#include <android/log.h>
+#include "UsbLog.h"
 #include <linux/usbdevice_fs.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -10,9 +10,6 @@
 #include <cstdlib>
 #include <cstring>
 
-#define LOG_TAG "ResonixUsb"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
 namespace resonix::usb {
 
@@ -43,7 +40,7 @@ int UsbfsTransport::claimInterface(int interfaceNumber) {
     }
     if (rc < 0) {
         const int e = errno;
-        LOGW("Claiming interface %d failed: %s", interfaceNumber, std::strerror(e));
+        USB_LOGW("Claiming interface %d failed: %s", interfaceNumber, std::strerror(e));
         return -e;
     }
     mClaimed.insert(interfaceNumber);
@@ -68,7 +65,7 @@ int UsbfsTransport::setAltSetting(int interfaceNumber, int altSetting) {
     si.altsetting = static_cast<unsigned int>(altSetting);
     if (ioctl(mFd, USBDEVFS_SETINTERFACE, &si) < 0) {
         const int e = errno;
-        LOGW("Selecting alt setting %d of interface %d failed: %s", altSetting, interfaceNumber, std::strerror(e));
+        USB_LOGW("Selecting alt setting %d of interface %d failed: %s", altSetting, interfaceNumber, std::strerror(e));
         return -e;
     }
     return 0;

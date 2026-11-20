@@ -119,6 +119,55 @@ class UsbDirectManager(
 
     fun release() = setEnabled(false)
 
+    /**
+     * A plain-text report for finding out why a DAC does not work: the phone, what Android sees on the USB bus,
+     * and what the engine's USB driver did (descriptors, the steps it took, its last log lines). On a phone there
+     * is no adb to read logcat with, so this is what gets pasted into a message.
+     */
+    fun report(): String {
+        val text = StringBuilder()
+        text.append("Resonix USB report\n")
+        text.append("phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
+        try {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            text.append("app: ${info.versionName}\n")
+        } catch (_: Exception) {
+        }
+        val status = PlaybackStateBus.usbDirect.value
+        text.append("Direct USB: ${if (enabled) "on" else "off"}, ${status.state} — ${status.message}\n")
+        text.append("microphone permission: ")
+        text.append(
+            if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) "granted\n" else "not granted\n"
+        )
+        text.append("\nUSB devices Android sees:\n")
+        val devices = try {
+            usbManager.deviceList.values.toList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+        if (devices.isEmpty()) text.append("  (none)\n")
+        for (d in devices) {
+            text.append(
+                "  ${labelOf(d)}  vendor 0x%04X product 0x%04X  permission: %s  playback stream: %s\n".format(
+                    d.vendorId, d.productId, usbManager.hasPermission(d), isAudioPlaybackDevice(d)
+                )
+            )
+            for (i in 0 until d.interfaceCount) {
+                val itf = d.getInterface(i)
+                if (itf.interfaceClass == UsbConstants.USB_CLASS_AUDIO) {
+                    text.append(
+                        "    interface ${itf.id} alt ${itf.alternateSetting}: audio subclass ${itf.interfaceSubclass}, ${itf.endpointCount} endpoint(s)\n"
+                    )
+                }
+            }
+        }
+        text.append("\n--- engine ---\n")
+        text.append(engine.usbReport())
+        return text.toString()
+    }
+
     private fun attach(candidate: UsbDevice, name: String) {
         val opened = try {
             usbManager.openDevice(candidate)

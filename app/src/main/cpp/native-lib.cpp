@@ -184,6 +184,23 @@ Java_com_resonix_player_audio_NativeAudioEngine_nativeSetUsbDirect(
     }
 }
 
+JNIEXPORT void JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeSetUsbHardwareVolume(
+        JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jboolean enabled) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    if (engine != nullptr) {
+        engine->setUsbHardwareVolume(enabled == JNI_TRUE);
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_resonix_player_audio_NativeAudioEngine_nativeUsbReport(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    auto *engine = reinterpret_cast<resonix::AudioEngine *>(handle);
+    const std::string report = engine != nullptr ? engine->usbReport() : std::string();
+    return env->NewStringUTF(report.c_str());
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_resonix_player_audio_NativeAudioEngine_nativeConsumeUsbLost(
         JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {

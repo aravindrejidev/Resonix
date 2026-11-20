@@ -143,6 +143,19 @@ class NativeAudioEngine {
         return nativeHandle != 0L && nativeConsumeUsbLost(nativeHandle)
     }
 
+    /**
+     * Use the DAC's own volume control (when it has one) to carry the volume while playing to it directly: the
+     * DAC attenuates instead of the engine throwing bits away. Takes effect with the next song.
+     */
+    fun setUsbHardwareVolume(enabled: Boolean) {
+        if (nativeHandle != 0L) nativeSetUsbHardwareVolume(nativeHandle, enabled)
+    }
+
+    /** What the DAC said about itself, what the driver did and its last log lines — for finding out why a DAC misbehaves. */
+    fun usbReport(): String {
+        return if (nativeHandle != 0L) nativeUsbReport(nativeHandle) else "(the engine is not running)"
+    }
+
     /** The engine is playing to the DAC directly right now. */
     fun isUsbStreaming(): Boolean {
         return nativeHandle != 0L && nativeIsUsbStreaming(nativeHandle)
@@ -299,6 +312,8 @@ class NativeAudioEngine {
     private external fun nativeSetUsbDirect(handle: Long, enabled: Boolean)
     private external fun nativeConsumeUsbLost(handle: Long): Boolean
     private external fun nativeIsUsbStreaming(handle: Long): Boolean
+    private external fun nativeSetUsbHardwareVolume(handle: Long, enabled: Boolean)
+    private external fun nativeUsbReport(handle: Long): String
     private external fun nativeSetPlatformMixerRate(handle: Long, hz: Int, routeKey: Int)
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetBitDepth(handle: Long): Int

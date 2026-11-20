@@ -36,7 +36,23 @@ struct StreamFormat {
     int frameBytes() const { return channels * subslotBytes; }
 };
 
+// The DAC's own volume control (a Feature Unit with a volume control) on the playback path.
+struct VolumeControl {
+    bool present = false;           // the descriptors have one
+    bool rangeKnown = false;        // ...and the DAC answered with its range
+    int unitId = 0;
+    int uac = 1;
+    std::vector<int> channels;      // what to set: {0} = the master channel, else the logical channels
+    int min256 = 0;                 // range and step in 1/256 dB
+    int max256 = 0;
+    int res256 = 1;
+    int original256 = 0;            // what the DAC was at before Resonix touched it
+    bool haveOriginal = false;
+    bool usable() const { return present && rangeKnown; }
+};
+
 struct DeviceCaps {
+    VolumeControl volume;
     int uac = 0;                    // 0 = no audio class found, else 1 or 2
     int controlInterface = -1;
     std::vector<StreamFormat> formats;  // playback alt settings that carry plain PCM
@@ -56,6 +72,9 @@ bool parseDescriptors(const uint8_t *data, size_t length, DeviceCaps *caps);
 // every format's [rates]. UAC1 lists its rates in the descriptors already.
 void queryClockRates(UsbTransport &transport, DeviceCaps *caps);
 
+// Asks the DAC for the range of its volume control (and the level it is at now). Needs the control interface.
+void queryVolumeRange(UsbTransport &transport, DeviceCaps *caps, int controlInterface);
+
 // Turns UAC1 "continuous" ranges into the standard rates inside them, then sorts and de-duplicates.
 void finalizeRates(DeviceCaps *caps);
 
@@ -70,5 +89,8 @@ const StreamFormat *chooseFormat(const DeviceCaps &caps, int rate, int channels,
 int nearestSupportedRate(const DeviceCaps &caps, int wanted);
 
 std::string describe(const DeviceCaps &caps);
+
+// Everything the descriptors said, one alt setting per line — for the USB report.
+std::string describeDetailed(const DeviceCaps &caps);
 
 }  // namespace resonix::usb

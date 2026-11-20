@@ -210,6 +210,28 @@ class PlaybackQueueManager(
         }
     }
 
+    /** Moves the song at [from] to place [to] (the other songs close up / make room). The one playing keeps playing. */
+    fun moveInQueue(from: Int, to: Int) {
+        if (from == to || from !in queue.indices || to !in queue.indices) return
+        val moved = queue.toMutableList()
+        val song = moved.removeAt(from)
+        moved.add(to, song)
+        queue = moved
+        originalOrder = moved  // a hand-made order is the order now
+        if (currentIndex >= 0) {
+            // Where the song that is playing ended up (the same rule the Queue screen uses for its own copy).
+            currentIndex = when {
+                currentIndex == from -> to
+                currentIndex > from && currentIndex <= to -> currentIndex - 1
+                currentIndex < from && currentIndex >= to -> currentIndex + 1
+                else -> currentIndex
+            }
+        }
+        publishQueue()
+        publishNeighbours()
+        schedulePrepareNext()  // the song that follows may be another one now
+    }
+
     /** Takes the song at [index] out of the queue. The one that is playing stays. */
     fun removeFromQueue(index: Int) {
         if (index !in queue.indices || index == currentIndex) return

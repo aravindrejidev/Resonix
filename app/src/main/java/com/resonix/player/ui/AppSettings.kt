@@ -109,6 +109,8 @@ data class SettingsState(
     val gapless: Boolean = true,
     /** Drive a USB DAC directly over USB, bypassing Android's audio stack (experimental). */
     val usbDirect: Boolean = false,
+    /** While playing to a USB DAC directly: let the DAC's own volume control carry the volume (when it has one). */
+    val usbHardwareVolume: Boolean = true,
 
     // Tools — equalizer
     val eqEnabled: Boolean = false,
@@ -196,6 +198,7 @@ class AppSettings private constructor(context: Context) {
             peakLimiter = prefs.getBoolean(KEY_LIMITER, d.peakLimiter),
             gapless = prefs.getBoolean(KEY_GAPLESS, d.gapless),
             usbDirect = prefs.getBoolean(KEY_USB_DIRECT, d.usbDirect),
+            usbHardwareVolume = prefs.getBoolean(KEY_USB_HW_VOLUME, d.usbHardwareVolume),
             outputFormat = parseEnum(prefs.getString(KEY_OUTPUT_FORMAT, null), d.outputFormat),
             dither = parseEnum(prefs.getString(KEY_DITHER, null), d.dither),
             resamplerQuality = parseEnum(prefs.getString(KEY_RESAMPLER, null), d.resamplerQuality),
@@ -237,6 +240,7 @@ class AppSettings private constructor(context: Context) {
             .putBoolean(KEY_LIMITER, s.peakLimiter)
             .putBoolean(KEY_GAPLESS, s.gapless)
             .putBoolean(KEY_USB_DIRECT, s.usbDirect)
+            .putBoolean(KEY_USB_HW_VOLUME, s.usbHardwareVolume)
             .putString(KEY_OUTPUT_FORMAT, s.outputFormat.name)
             .putString(KEY_DITHER, s.dither.name)
             .putString(KEY_RESAMPLER, s.resamplerQuality.name)
@@ -288,6 +292,7 @@ class AppSettings private constructor(context: Context) {
         private const val KEY_LIMITER = "peak_limiter"
         private const val KEY_GAPLESS = "gapless"
         private const val KEY_USB_DIRECT = "usb_direct"
+        private const val KEY_USB_HW_VOLUME = "usb_hw_volume"
         private const val KEY_EQ_ON = "eq_enabled"
         private const val KEY_EQ_PRESET = "eq_preset"
         private const val KEY_EQ_BANDS = "eq_bands"

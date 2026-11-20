@@ -42,7 +42,7 @@ struct Uac2Alt { int alt; int subslot; int bits; bool feedback = true; int syncA
 // UAC2: control interface 0, clock source 1 (internal), input terminal 2 (USB streaming), output terminal 3;
 // streaming interface 1 with the given alt settings (OUT 0x01, feedback IN 0x81).
 inline Bytes uac2Descriptors(const std::vector<Uac2Alt> &alts, int channels = 2, bool withCapture = false,
-                              int maxPacket = 400) {
+                              int maxPacket = 400, bool withVolume = false) {
     Bytes dev = {18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x34, 0x12, 0x78, 0x56, 0x00, 0x01, 0, 0, 0, 1};
     Bytes body;
     append(body, iface(0, 0, 0, 1, 1, 0x20));
@@ -51,7 +51,14 @@ inline Bytes uac2Descriptors(const std::vector<Uac2Alt> &alts, int channels = 2,
         Bytes clk = {8, 0x24, 0x0A, 1, 1, 7, 0, 0}; append(body, clk);
         Bytes it = {17, 0x24, 0x02, 2}; put16(it, 0x0101); it.push_back(0); it.push_back(1); it.push_back(channels);
         put32(it, 3); it.push_back(0); put16(it, 0); it.push_back(0); append(body, it);
-        Bytes ot = {12, 0x24, 0x03, 3}; put16(ot, 0x0301); ot.push_back(0); ot.push_back(2); ot.push_back(1); put16(ot, 0); ot.push_back(0); append(body, ot);
+        if (withVolume) {   // feature unit 4 on the stream's input terminal 2: master mute + volume read/write
+            Bytes fu = {(uint8_t)(6 + 4 * (channels + 1)), 0x24, 0x06, 4, 2};
+            put32(fu, 0x0F);
+            for (int c = 0; c < channels; c++) put32(fu, 0);
+            fu.push_back(0);
+            append(body, fu);
+        }
+        Bytes ot = {12, 0x24, 0x03, 3}; put16(ot, 0x0301); ot.push_back(0); ot.push_back(withVolume ? 4 : 2); ot.push_back(1); put16(ot, 0); ot.push_back(0); append(body, ot);
     }
     append(body, iface(1, 0, 0, 1, 2, 0x20));
     for (const Uac2Alt &a : alts) {
@@ -76,13 +83,17 @@ inline Bytes uac2Descriptors(const std::vector<Uac2Alt> &alts, int channels = 2,
 struct Uac1Alt { int alt; int channels; int subframe; int bits; std::vector<int> rates; bool async = false; };
 
 // UAC1 (full speed): control interface 0, streaming interface 1. Adaptive OUT 0x01, or async with sync IN 0x81.
-inline Bytes uac1Descriptors(const std::vector<Uac1Alt> &alts) {
+inline Bytes uac1Descriptors(const std::vector<Uac1Alt> &alts, bool withVolume = false) {
     Bytes dev = {18, 1, 0x10, 0x01, 0, 0, 0, 64, 0x34, 0x12, 0x79, 0x56, 0x00, 0x01, 0, 0, 0, 1};
     Bytes body;
     append(body, iface(0, 0, 0, 1, 1, 0));
     Bytes hdr = {9, 0x24, 0x01, 0x00, 0x01, 0, 0, 1, 1}; append(body, hdr);
     Bytes it = {12, 0x24, 0x02, 1}; put16(it, 0x0101); it.push_back(0); it.push_back(2); put16(it, 3); it.push_back(0); it.push_back(0); append(body, it);
-    Bytes ot = {9, 0x24, 0x03, 2}; put16(ot, 0x0301); ot.push_back(0); ot.push_back(1); ot.push_back(0); append(body, ot);
+    if (withVolume) {   // feature unit 3 on input terminal 1: master mute + volume
+        Bytes fu = {(uint8_t)(7 + 3), 0x24, 0x06, 3, 1, 1, 0x03, 0, 0, 0};
+        append(body, fu);
+    }
+    Bytes ot = {9, 0x24, 0x03, 2}; put16(ot, 0x0301); ot.push_back(0); ot.push_back(withVolume ? 3 : 1); ot.push_back(0); append(body, ot);
     append(body, iface(1, 0, 0, 1, 2, 0));
     for (const Uac1Alt &a : alts) {
         append(body, iface(1, a.alt, a.async ? 2 : 1, 1, 2, 0));
@@ -114,6 +125,9 @@ public:
     double speedup = 16.0;           // virtual time runs this much faster than real time
     std::vector<int> clockRates = {44100, 48000, 88200, 96000, 176400, 192000};  // what GET_RANGE returns
     bool rejectClockSet = false;
+    // the volume control (feature unit)
+    int volMin256 = -60 * 256, volMax256 = 0, volRes256 = 128, volCur256 = -3 * 256;
+    std::vector<std::pair<int,int>> volumeSets;   // (channel, value in 1/256 dB) of every SET_CUR
     int clockClaimRate = 0;          // what GET_CUR claims (0 = whatever was set)
 
     // observations
@@ -146,6 +160,27 @@ public:
         std::snprintf(buf, sizeof(buf), "%02X %02X %04X %04X len=%u", rt, req, value, index, length);
         controlLog.push_back(std::string(buf));
         auto *d = static_cast<uint8_t *>(data);
+        if ((value >> 8) == 0x02 && (index >> 8) != 0) {                      // volume control of a feature unit
+            const int ch = value & 0xFF;
+            auto w16 = [&](uint8_t *p, int v) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; };
+            if (rt == 0x21 && req == 0x01 && length == 2) {                   // SET_CUR (UAC1 and UAC2)
+                const int v = (int16_t)(d[0] | (d[1] << 8));
+                volumeSets.push_back({ch, v});
+                volCur256 = v;
+                return 2;
+            }
+            if (rt == 0xA1 && (req == 0x81 || req == 0x01) && length == 2) { w16(d, volCur256); return 2; }   // GET_CUR
+            if (rt == 0xA1 && req == 0x82) { w16(d, volMin256); return 2; }                                  // UAC1 GET_MIN
+            if (rt == 0xA1 && req == 0x83) { w16(d, volMax256); return 2; }
+            if (rt == 0xA1 && req == 0x84) { w16(d, volRes256); return 2; }
+            if (rt == 0xA1 && req == 0x02) {                                  // UAC2 GET_RANGE: one sub-range
+                Bytes r; put16(r, 1); put16(r, volMin256 & 0xFFFF); put16(r, volMax256 & 0xFFFF); put16(r, volRes256);
+                const int n = std::min<int>(length, (int)r.size());
+                std::memcpy(d, r.data(), n);
+                return n;
+            }
+            return -32;
+        }
         if (rt == 0xA1 && req == 0x02 && value == 0x0100) {          // UAC2 clock GET_RANGE
             Bytes r; put16(r, (int)clockRates.size());
             for (int rate : clockRates) { put32(r, rate); put32(r, rate); put32(r, 0); }
@@ -229,6 +264,7 @@ public:
         for (auto &p : pending) if (p.t == t) p.discarded = true;
     }
 
+    int volume() { std::lock_guard<std::mutex> l(mu); return volCur256; }
     // frames per second the host actually sent, measured over the packets seen so far
     double sentFrames(int frameBytes) { std::lock_guard<std::mutex> l(mu); return received.size() / (double)frameBytes; }
     double virtualNow() const { return started.load(std::memory_order_acquire) ? std::chrono::duration<double>(Clock::now() - t0).count() * speedup : 0.0; }

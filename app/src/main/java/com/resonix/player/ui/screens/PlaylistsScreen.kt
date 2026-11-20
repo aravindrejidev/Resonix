@@ -29,7 +29,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
@@ -42,7 +45,11 @@ import com.resonix.player.data.PlaylistTrack
 import com.resonix.player.data.Track
 import com.resonix.player.ui.components.ConfirmDialog
 import com.resonix.player.ui.components.NameDialog
+import com.resonix.player.ui.components.ReorderHandle
+import com.resonix.player.ui.components.ReorderMath
 import com.resonix.player.ui.components.TrackRow
+import com.resonix.player.ui.components.rememberReorderState
+import com.resonix.player.ui.components.reorderRow
 import com.resonix.player.ui.neo.NeoIconBadge
 import com.resonix.player.ui.neo.NeoIconButton
 import com.resonix.player.ui.neo.NeoIcons
@@ -78,6 +85,8 @@ fun PlaylistsScreen(
     onRemoveEntry: (entryId: Long) -> Unit,
     onTrackMenu: (Track) -> Unit,
     onClose: () -> Unit,
+    /** The songs of a playlist were dragged into a new order: the entry ids, in that order. */
+    onReorder: (playlistId: Long, entryIds: List<Long>) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val open = playlists.firstOrNull { it.id == openPlaylistId }
@@ -157,6 +166,7 @@ fun PlaylistsScreen(
                     onPlayFrom = { index -> onPlay(open.id, false, index) },
                     onRemoveEntry = onRemoveEntry,
                     onTrackMenu = onTrackMenu,
+                    onReorder = { ordered -> onReorder(open.id, ordered.map { it.entryId }) },
                 )
             }
         }
@@ -361,8 +371,16 @@ private fun PlaylistDetail(
     onPlayFrom: (index: Int) -> Unit,
     onRemoveEntry: (entryId: Long) -> Unit,
     onTrackMenu: (Track) -> Unit,
+    onReorder: (List<PlaylistTrack>) -> Unit,
 ) {
     val neo = LocalNeoColors.current
+    // Follows the finger at once; the list from the database replaces it when it arrives.
+    var shown by remember(tracks) { mutableStateOf(tracks) }
+    val reorder = rememberReorderState { from, to ->
+        shown = ReorderMath.move(shown, from, to)
+        onReorder(shown)
+    }
+    val spacingPx = with(LocalDensity.current) { 2.dp.toPx() }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 10.dp, end = 10.dp, top = 8.dp, bottom = bottomInset),
@@ -392,7 +410,7 @@ private fun PlaylistDetail(
                 )
             }
         }
-        if (tracks.isEmpty()) {
+        if (shown.isEmpty()) {
             item(key = "empty") {
                 Text(
                     text = "No songs yet. Press and hold a song anywhere and choose Add to playlist.",
@@ -405,8 +423,14 @@ private fun PlaylistDetail(
                 )
             }
         } else {
-            itemsIndexed(tracks, key = { _, entry -> entry.entryId }) { index, entry ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            itemsIndexed(shown, key = { _, entry -> entry.entryId }) { index, entry ->
+                var rowHeight by remember { mutableIntStateOf(0) }
+                Row(
+                    modifier = Modifier
+                        .reorderRow(reorder, index)
+                        .onSizeChanged { rowHeight = it.height },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     TrackRow(
                         track = entry.track,
                         isCurrent = entry.track.contentUri == currentUri,
@@ -423,6 +447,13 @@ private fun PlaylistDetail(
                         diameter = 38.dp,
                         iconSize = 18.dp,
                         contentDescription = "Remove from playlist",
+                    )
+                    ReorderHandle(
+                        state = reorder,
+                        index = index,
+                        count = shown.size,
+                        rowHeightPx = { rowHeight },
+                        spacingPx = spacingPx,
                     )
                 }
             }

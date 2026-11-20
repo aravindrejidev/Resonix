@@ -19,16 +19,26 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.resonix.player.data.Track
 import com.resonix.player.playback.QueueSnapshot
+import com.resonix.player.ui.components.ReorderHandle
+import com.resonix.player.ui.components.ReorderMath
 import com.resonix.player.ui.components.TrackRow
+import com.resonix.player.ui.components.rememberReorderState
+import com.resonix.player.ui.components.reorderRow
 import com.resonix.player.ui.neo.NeoIconBadge
 import com.resonix.player.ui.neo.NeoIconButton
 import com.resonix.player.ui.neo.NeoIcons
@@ -39,7 +49,8 @@ import com.resonix.player.ui.theme.NeoType
 /**
  * The queue: every song in play order, the one playing highlighted and the ones already played
  * dimmed. Tap a song to jump to it, the cross takes it out of the queue, press and hold for its
- * actions, and the bin clears everything after the song that is playing.
+ * actions, drag the grip at the end of a row to move it, and the bin clears everything after the song
+ * that is playing.
  */
 @Composable
 fun QueueScreen(
@@ -50,10 +61,22 @@ fun QueueScreen(
     onClear: () -> Unit,
     onTrackMenu: (Track) -> Unit,
     onClose: () -> Unit,
+    onMove: (from: Int, to: Int) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val neo = LocalNeoColors.current
-    val upNext = if (queue.currentIndex in queue.tracks.indices) queue.tracks.size - queue.currentIndex - 1 else 0
+    // The list follows the finger at once and does not jump back while the change travels to the service and
+    // returns; a fresh queue from the service replaces it.
+    var shown by remember(queue) { mutableStateOf(queue) }
+    val reorder = rememberReorderState { from, to ->
+        shown = QueueSnapshot(
+            tracks = ReorderMath.move(shown.tracks, from, to),
+            currentIndex = if (shown.currentIndex >= 0) ReorderMath.indexAfterMove(shown.currentIndex, from, to) else -1,
+        )
+        onMove(from, to)
+    }
+    val spacingPx = with(LocalDensity.current) { 2.dp.toPx() }
+    val upNext = if (shown.currentIndex in shown.tracks.indices) shown.tracks.size - shown.currentIndex - 1 else 0
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = (queue.currentIndex - 1).coerceAtLeast(0),
     )
@@ -82,7 +105,7 @@ fun QueueScreen(
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = "QUEUE", color = neo.accent, style = NeoType.overline, maxLines = 1)
                 Text(
-                    text = if (queue.tracks.isEmpty()) "Nothing queued" else "${queue.tracks.size} songs",
+                    text = if (shown.tracks.isEmpty()) "Nothing queued" else "${shown.tracks.size} songs",
                     color = neo.textPrimary,
                     style = NeoType.title,
                     maxLines = 1,
@@ -106,7 +129,7 @@ fun QueueScreen(
             }
         }
 
-        if (queue.tracks.isEmpty()) {
+        if (shown.tracks.isEmpty()) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -134,9 +157,15 @@ fun QueueScreen(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 // A song can be in the queue twice, so the position is part of the key.
-                itemsIndexed(queue.tracks, key = { index, track -> "$index:${track.contentUri}" }) { index, track ->
-                    val current = index == queue.currentIndex
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                itemsIndexed(shown.tracks, key = { index, track -> "$index:${track.contentUri}" }) { index, track ->
+                    val current = index == shown.currentIndex
+                    var rowHeight by remember { mutableIntStateOf(0) }
+                    Row(
+                        modifier = Modifier
+                            .reorderRow(reorder, index)
+                            .onSizeChanged { rowHeight = it.height },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         TrackRow(
                             track = track,
                             isCurrent = current,
@@ -146,7 +175,7 @@ fun QueueScreen(
                             onClick = { onJump(index) },
                             modifier = Modifier
                                 .weight(1f)
-                                .alpha(if (index < queue.currentIndex) 0.5f else 1f),
+                                .alpha(if (index < shown.currentIndex) 0.5f else 1f),
                             onLongClick = { onTrackMenu(track) },
                         )
                         if (!current) {
@@ -158,6 +187,13 @@ fun QueueScreen(
                                 contentDescription = "Remove from queue",
                             )
                         }
+                        ReorderHandle(
+                            state = reorder,
+                            index = index,
+                            count = shown.tracks.size,
+                            rowHeightPx = { rowHeight },
+                            spacingPx = spacingPx,
+                        )
                     }
                 }
             }

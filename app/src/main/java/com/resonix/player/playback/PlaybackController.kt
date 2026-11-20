@@ -96,6 +96,8 @@ object PlaybackController {
 
     fun clearUpcoming() = runIfActive { it.clearUpcoming() }
 
+    fun moveQueueItem(from: Int, to: Int) = runIfActive { it.moveQueueItem(from, to) }
+
     /** "Play next". Starts playback if nothing is playing. */
     fun enqueueNext(context: Context, track: Track) = run(context) { it.enqueueNext(track) }
 

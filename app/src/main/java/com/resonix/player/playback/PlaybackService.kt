@@ -167,6 +167,7 @@ class PlaybackService : Service() {
         )
 
         usbDirect = UsbDirectManager(this, engine) { onUsbDirectChanged() }
+        PlaybackStateBus.usbReportProvider = { usbDirect.report() }
 
         // The very first apply happens right here (no stream exists yet, so it is instant) so the
         // first song already opens with the saved Output / Exclusive / Bit-perfect choices.
@@ -224,6 +225,7 @@ class PlaybackService : Service() {
         }
         audioFocusManager.abandonFocus()
         queueManager.release()  // waits for an in-flight load: the engine must outlive it
+        PlaybackStateBus.usbReportProvider = null
         usbDirect.release()
         channelProber?.release()
         engineSettingsExecutor.shutdown()
@@ -286,6 +288,11 @@ class PlaybackService : Service() {
     fun clearUpcoming() {
         queueManager.clearUpcoming()
         refreshAll()
+    }
+
+    fun moveQueueItem(from: Int, to: Int) {
+        queueManager.moveInQueue(from, to)
+        refreshAll()  // which song comes next may have changed
     }
 
     fun enqueueNext(track: Track) {
@@ -395,7 +402,7 @@ class PlaybackService : Service() {
     }
 
     private fun planSettingsKey(s: SettingsState): String =
-        "${s.outputFormat}/${s.usbBitPerfect}/${s.bitPerfect}/${s.resamplerQuality}/${s.usbDirect}"
+        "${s.outputFormat}/${s.usbBitPerfect}/${s.bitPerfect}/${s.resamplerQuality}/${s.usbDirect}/${s.usbHardwareVolume}"
 
     private fun routeKey(route: OutputRoute): String = "${route.kind}/${route.deviceId}"
 

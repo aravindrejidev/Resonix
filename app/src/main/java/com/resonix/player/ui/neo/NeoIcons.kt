@@ -16,6 +16,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.CreateNewFolder
@@ -106,6 +107,7 @@ object NeoIcons {
     val Add: ImageVector get() = Icons.Rounded.Add
     val Delete: ImageVector get() = Icons.Rounded.Delete
     val Edit: ImageVector get() = Icons.Rounded.Edit
+    val DragHandle: ImageVector get() = Icons.Rounded.DragHandle
     val Queue: ImageVector get() = Icons.AutoMirrored.Rounded.QueueMusic
     val Playlists: ImageVector get() = Icons.AutoMirrored.Rounded.PlaylistPlay
     val AddToPlaylist: ImageVector get() = Icons.AutoMirrored.Rounded.PlaylistAdd

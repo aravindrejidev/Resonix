@@ -1,6 +1,6 @@
 #include "UsbStreamer.h"
 
-#include <android/log.h>
+#include "UsbLog.h"
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -10,10 +10,6 @@
 #include <chrono>
 #include <cstring>
 
-#define LOG_TAG "ResonixUsb"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace resonix::usb {
 namespace {
@@ -29,11 +25,11 @@ void raiseThreadPriority() {
     const pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
     for (int nice : {-19, -16, -10}) {
         if (setpriority(PRIO_PROCESS, static_cast<id_t>(tid), nice) == 0) {
-            LOGI("USB audio thread priority %d", nice);
+            USB_LOGI("USB audio thread priority %d", nice);
             return;
         }
     }
-    LOGW("USB audio thread keeps its normal priority (%s)", std::strerror(errno));
+    USB_LOGW("USB audio thread keeps its normal priority (%s)", std::strerror(errno));
 }
 
 }  // namespace
@@ -182,7 +178,7 @@ bool UsbStreamer::submitOut(IsoTransfer *t) {
     t->status = 0;
     const int rc = mTransport.submit(t);
     if (rc != 0) {
-        LOGE("Submitting audio failed: %s", std::strerror(-rc));
+        USB_LOGE("Submitting audio failed: %s", std::strerror(-rc));
         return false;
     }
     mInFlight++;
@@ -197,7 +193,7 @@ bool UsbStreamer::submitFeedback(IsoTransfer *t) {
     t->status = 0;
     const int rc = mTransport.submit(t);
     if (rc != 0) {
-        LOGW("Submitting a feedback read failed: %s", std::strerror(-rc));
+        USB_LOGW("Submitting a feedback read failed: %s", std::strerror(-rc));
         return false;
     }
     mInFlight++;
@@ -231,7 +227,7 @@ void UsbStreamer::threadMain() {
         IsoTransfer *t = mTransport.reap(100, &error);
         if (t == nullptr) {
             if (error < 0) {
-                LOGE("USB device lost while streaming: %s", std::strerror(-error));
+                USB_LOGE("USB device lost while streaming: %s", std::strerror(-error));
                 fail();
                 break;
             }
@@ -243,9 +239,14 @@ void UsbStreamer::threadMain() {
             continue;
         }
 
-        mUrbs.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t urbs = mUrbs.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (urbs % 2000 == 0) {  // about every 8 seconds: a line for the USB report
+            USB_LOGI("stream: %llu frames, %llu transfers, %llu packet errors, feedback %.1f Hz",
+                 static_cast<unsigned long long>(mFramesSent.load()), static_cast<unsigned long long>(urbs),
+                 static_cast<unsigned long long>(mPacketErrors.load()), mFeedbackHzTimes16.load() / 16.0);
+        }
         if (t->status == -ENODEV || t->status == -ESHUTDOWN) {
-            LOGE("USB device gone (%s)", std::strerror(-t->status));
+            USB_LOGE("USB device gone (%s)", std::strerror(-t->status));
             fail();
             break;
         }
@@ -256,7 +257,7 @@ void UsbStreamer::threadMain() {
         if (bad > 0) {
             mPacketErrors.fetch_add(static_cast<uint64_t>(bad), std::memory_order_relaxed);
             if (++mBadInARow > kTooManyBadInARow) {
-                LOGE("USB audio keeps failing, giving up");
+                USB_LOGE("USB audio keeps failing, giving up");
                 fail();
                 break;
             }
@@ -269,6 +270,9 @@ void UsbStreamer::threadMain() {
         }
     }
 
+    USB_LOGI("stream ended: %llu frames, %llu transfers, %llu packet errors, feedback %.1f Hz",
+         static_cast<unsigned long long>(mFramesSent.load()), static_cast<unsigned long long>(mUrbs.load()),
+         static_cast<unsigned long long>(mPacketErrors.load()), mFeedbackHzTimes16.load() / 16.0);
     // Take everything back from the kernel before the buffers go away.
     for (auto &t : mOut) mTransport.discard(t.get());
     for (auto &t : mFeedback) mTransport.discard(t.get());

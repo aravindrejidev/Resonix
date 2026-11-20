@@ -112,6 +112,8 @@ fun SettingsScreen(
     outputRoute: OutputRoute,
     /** What Direct USB output has found (a DAC, a permission to wait for …); empty when it is off. */
     usbDirectStatus: String = "",
+    /** Copies the USB report (what a DAC said, what the driver did) to the clipboard. */
+    onCopyUsbReport: () -> Unit = {},
     page: SettingsPage?,
     onPageChange: (SettingsPage?) -> Unit,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
@@ -184,7 +186,7 @@ fun SettingsScreen(
                         onScanDevice = onScanDevice,
                         onRescanFolder = onRescanFolder,
                     )
-                    SettingsPage.AUDIO -> AudioSection(settings, outputRoute, usbDirectStatus, onChange)
+                    SettingsPage.AUDIO -> AudioSection(settings, outputRoute, usbDirectStatus, onCopyUsbReport, onChange)
                     SettingsPage.ABOUT -> AboutSection(versionName)
                 }
             }
@@ -460,6 +462,7 @@ private fun AudioSection(
     settings: SettingsState,
     route: OutputRoute,
     usbDirectStatus: String,
+    onCopyUsbReport: () -> Unit,
     onChange: ((SettingsState) -> SettingsState) -> Unit,
 ) {
     SettingsGroup("Connected output") {
@@ -512,6 +515,22 @@ private fun AudioSection(
                 (if (settings.usbDirect && usbDirectStatus.isNotBlank()) "\n$usbDirectStatus" else ""),
             checked = settings.usbDirect,
             onCheckedChange = { on -> onChange { it.copy(usbDirect = on) } },
+        )
+        SettingsDivider()
+        ToggleRow(
+            icon = NeoIcons.Bolt,
+            title = "Use the DAC's own volume control",
+            subtitle = "With Direct USB output: a DAC that has a volume control attenuates the sound itself, so no bits are thrown away. " +
+                "Without one (or with this off) the volume is done by Resonix.",
+            checked = settings.usbHardwareVolume,
+            onCheckedChange = { on -> onChange { it.copy(usbHardwareVolume = on) } },
+        )
+        SettingsDivider()
+        ActionRow(
+            icon = NeoIcons.Storage,
+            title = "Copy USB report",
+            subtitle = "If a DAC does not work as it should, copy this and paste it into a message: what the DAC reports, what Resonix did, and the last log lines.",
+            onClick = onCopyUsbReport,
         )
         SettingsDivider()
         ToggleRow(

@@ -219,6 +219,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearUpcoming() = PlaybackController.clearUpcoming()
 
+    fun moveQueueItem(from: Int, to: Int) = PlaybackController.moveQueueItem(from, to)
+
     fun playNext(track: Track) {
         PlaybackController.enqueueNext(getApplication(), track)
         AppMessages.post("“${track.title}” plays next")
@@ -289,6 +291,19 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Removing from playlist failed", e)
+            }
+        }
+    }
+
+    /** The songs of a playlist were dragged into a new order. */
+    fun reorderPlaylist(playlistId: Long, entryIdsInOrder: List<Long>) {
+        viewModelScope.launch {
+            try {
+                playlistDao.reorder(playlistId, entryIdsInOrder)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Reordering playlist failed", e)
             }
         }
     }
